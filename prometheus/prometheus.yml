@@ -1,0 +1,26 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'proposers'
+    static_configs:
+      - targets: ['proposer-1:8080', 'proposer-2:8080', 'proposer-3:8080', 'proposer-4:8080', 'proposer-5:8080']
+        labels:
+          group: 'proposers'
+
+  - job_name: 'acceptors'
+    static_configs:
+      - targets: ['acceptor-1:8080', 'acceptor-2:8080', 'acceptor-3:8080', 'acceptor-4:8080', 'acceptor-5:8080']
+        labels:
+          group: 'acceptors'
+
+  - job_name: 'learners'
+    static_configs:
+      - targets: ['learner-1:8080', 'learner-2:8080', 'learner-3:8080']
+        labels:
+          group: 'learners'

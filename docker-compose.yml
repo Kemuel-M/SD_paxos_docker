@@ -1,0 +1,249 @@
+version: '3.8'
+
+services:
+  # Proposers
+  proposer-1:
+    build:
+      context: ./proposer
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ID=1
+      - NODE_ROLE=proposer
+      - QUORUM_SIZE=3
+    volumes:
+      - proposer_1_data:/app/data
+    ports:
+      - "8081:8080"
+    networks:
+      - paxos_network
+  
+  proposer-2:
+    build:
+      context: ./proposer
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ID=2
+      - NODE_ROLE=proposer
+      - QUORUM_SIZE=3
+    volumes:
+      - proposer_2_data:/app/data
+    ports:
+      - "8082:8080"
+    networks:
+      - paxos_network
+
+  proposer-3:
+    build:
+      context: ./proposer
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ID=3
+      - NODE_ROLE=proposer
+      - QUORUM_SIZE=3
+    volumes:
+      - proposer_3_data:/app/data
+    ports:
+      - "8083:8080"
+    networks:
+      - paxos_network
+      
+  proposer-4:
+    build:
+      context: ./proposer
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ID=4
+      - NODE_ROLE=proposer
+      - QUORUM_SIZE=3
+    volumes:
+      - proposer_4_data:/app/data
+    ports:
+      - "8084:8080"
+    networks:
+      - paxos_network
+      
+  proposer-5:
+    build:
+      context: ./proposer
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ID=5
+      - NODE_ROLE=proposer
+      - QUORUM_SIZE=3
+    volumes:
+      - proposer_5_data:/app/data
+    ports:
+      - "8085:8080"
+    networks:
+      - paxos_network
+  
+  # Acceptors
+  acceptor-1:
+    build:
+      context: ./acceptor
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ID=1
+      - NODE_ROLE=acceptor
+    volumes:
+      - acceptor_1_data:/app/data
+    networks:
+      - paxos_network
+  
+  acceptor-2:
+    build:
+      context: ./acceptor
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ID=2
+      - NODE_ROLE=acceptor
+    volumes:
+      - acceptor_2_data:/app/data
+    networks:
+      - paxos_network
+  
+  acceptor-3:
+    build:
+      context: ./acceptor
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ID=3
+      - NODE_ROLE=acceptor
+    volumes:
+      - acceptor_3_data:/app/data
+    networks:
+      - paxos_network
+      
+  acceptor-4:
+    build:
+      context: ./acceptor
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ID=4
+      - NODE_ROLE=acceptor
+    volumes:
+      - acceptor_4_data:/app/data
+    networks:
+      - paxos_network
+      
+  acceptor-5:
+    build:
+      context: ./acceptor
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ID=5
+      - NODE_ROLE=acceptor
+    volumes:
+      - acceptor_5_data:/app/data
+    networks:
+      - paxos_network
+  
+  # Learners
+  learner-1:
+    build:
+      context: ./learner
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ID=1
+      - NODE_ROLE=learner
+    volumes:
+      - learner_1_data:/app/data
+      - shared_fs:/app/shared
+    ports:
+      - "8091:8080"
+    networks:
+      - paxos_network
+  
+  learner-2:
+    build:
+      context: ./learner
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ID=2
+      - NODE_ROLE=learner
+    volumes:
+      - learner_2_data:/app/data
+      - shared_fs:/app/shared
+    ports:
+      - "8092:8080"
+    networks:
+      - paxos_network
+      
+  learner-3:
+    build:
+      context: ./learner
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ID=3
+      - NODE_ROLE=learner
+    volumes:
+      - learner_3_data:/app/data
+      - shared_fs:/app/shared
+    ports:
+      - "8093:8080"
+    networks:
+      - paxos_network
+  
+  # Web UI (para os 3 clientes iniciais)
+  web-ui:
+    build:
+      context: ./web-ui
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+    networks:
+      - paxos_network
+    depends_on:
+      - proposer-1
+      - proposer-2
+      - proposer-3
+      - proposer-4
+      - proposer-5
+      - learner-1
+      - learner-2
+      - learner-3
+  
+  # Monitoramento Básico
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - paxos_network
+  
+  grafana:
+    image: grafana/grafana:latest
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - paxos_network
+    depends_on:
+      - prometheus
+
+volumes:
+  proposer_1_data:
+  proposer_2_data:
+  proposer_3_data:
+  proposer_4_data:
+  proposer_5_data:
+  acceptor_1_data:
+  acceptor_2_data:
+  acceptor_3_data:
+  acceptor_4_data:
+  acceptor_5_data:
+  learner_1_data:
+  learner_2_data:
+  learner_3_data:
+  shared_fs:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  paxos_network:
+    driver: bridge

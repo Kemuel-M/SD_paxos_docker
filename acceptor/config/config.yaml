@@ -1,0 +1,14 @@
+node:
+  id: ${NODE_ID}
+  role: acceptor
+  
+storage:
+  path: /app/data/acceptor.json
+  syncOnAccept: true
+  
+networking:
+  port: 8080
+  learners:
+    - learner-1:8080
+    - learner-2:8080
+    - learner-3:8080
