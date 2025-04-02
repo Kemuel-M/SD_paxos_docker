@@ -148,7 +148,6 @@ services:
       - NODE_ROLE=learner
     volumes:
       - learner_1_data:/app/data
-      - shared_fs:/app/shared
     ports:
       - "8091:8080"
     networks:
@@ -163,28 +162,58 @@ services:
       - NODE_ROLE=learner
     volumes:
       - learner_2_data:/app/data
-      - shared_fs:/app/shared
     ports:
       - "8092:8080"
     networks:
       - paxos_network
-      
-  learner-3:
+
+  # Store (Cluster Store)
+  store-1:
     build:
-      context: ./learner
+      context: ./store
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ID=1
+      - NODE_ROLE=store
+    volumes:
+      - store_1_data:/app/data
+      - store_1_resource:/app/resource
+    ports:
+      - "8101:8080"
+    networks:
+      - paxos_network
+
+  store-2:
+    build:
+      context: ./store
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ID=2
+      - NODE_ROLE=store
+    volumes:
+      - store_2_data:/app/data
+      - store_2_resource:/app/resource
+    ports:
+      - "8102:8080"
+    networks:
+      - paxos_network
+
+  store-3:
+    build:
+      context: ./store
       dockerfile: Dockerfile
     environment:
       - NODE_ID=3
-      - NODE_ROLE=learner
+      - NODE_ROLE=store
     volumes:
-      - learner_3_data:/app/data
-      - shared_fs:/app/shared
+      - store_3_data:/app/data
+      - store_3_resource:/app/resource
     ports:
-      - "8093:8080"
+      - "8103:8080"
     networks:
       - paxos_network
   
-  # Web UI (para os 3 clientes iniciais)
+  # Web UI
   web-ui:
     build:
       context: ./web-ui
@@ -201,9 +230,11 @@ services:
       - proposer-5
       - learner-1
       - learner-2
-      - learner-3
+      - store-1
+      - store-2
+      - store-3
   
-  # Monitoramento Básico
+  # Monitoring
   prometheus:
     image: prom/prometheus:latest
     volumes:
@@ -226,6 +257,38 @@ services:
     depends_on:
       - prometheus
 
+  # Node exporter for host metrics
+  node-exporter:
+    image: prom/node-exporter:latest
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc)($$|/)'
+    ports:
+      - "9100:9100"
+    networks:
+      - paxos_network
+    restart: unless-stopped
+
+  # cAdvisor for container metrics
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    ports:
+      - "8080:8080"
+    networks:
+      - paxos_network
+    restart: unless-stopped
+
 volumes:
   proposer_1_data:
   proposer_2_data:
@@ -239,8 +302,12 @@ volumes:
   acceptor_5_data:
   learner_1_data:
   learner_2_data:
-  learner_3_data:
-  shared_fs:
+  store_1_data:
+  store_2_data:
+  store_3_data:
+  store_1_resource:
+  store_2_resource:
+  store_3_resource:
   prometheus_data:
   grafana_data:
 

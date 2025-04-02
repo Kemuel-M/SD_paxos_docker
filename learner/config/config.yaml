@@ -3,7 +3,6 @@ node:
   role: learner
   
 filesystem:
-  sharedPath: /app/shared
   metadataPath: /app/data/metadata.json
   
 networking:
@@ -17,4 +16,18 @@ networking:
   learners:
     - learner-1:8080
     - learner-2:8080
-    - learner-3:8080
+  stores:
+    - store-1:8080
+    - store-2:8080
+    - store-3:8080
+
+store:
+  readQuorum: 1  # Nr (Read One)
+  writeQuorum: 3  # Nw (Write All)
+  
+protocol:
+  # Protocol configurations for voting protocol with Store
+  preparationTimeout: 1000  # Timeout in ms for prepare phase
+  commitTimeout: 2000       # Timeout in ms for commit phase
+  maxRetries: 3             # Maximum retries for store operations
+  retryBackoffMs: 500       # Base backoff time between retries in ms

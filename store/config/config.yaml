@@ -1,0 +1,33 @@
+node:
+  id: ${NODE_ID}
+  role: store
+  
+storage:
+  path: /app/data/store.json
+  resourcePath: /app/resource
+  syncIntervalSeconds: 10
+  
+networking:
+  port: 8080
+  learners:
+    - learner-1:8080
+    - learner-2:8080
+    - learner-3:8080
+  stores:
+    - store-1:8080
+    - store-2:8080
+    - store-3:8080
+    
+protocol:
+  # Protocol configurations for ROWA (Read One, Write All)
+  readQuorum: 1
+  writeQuorum: 3
+  # Two-Phase Commit timeout in milliseconds
+  preparationTimeout: 1000
+  commitTimeout: 2000
+  # Heartbeat interval in milliseconds
+  heartbeatInterval: 2000
+  # Recovery configurations
+  recoveryTimeout: 5000
+  maxRetries: 3
+  retryBackoffMs: 500
