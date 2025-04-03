@@ -25,9 +25,29 @@ if ! command -v pip3 &> /dev/null; then
     exit 1
 fi
 
-# Instalar dependências se ainda não foram instaladas
+# Instalar dependências
+echo -e "${YELLOW}Instalando dependências...${NC}"
+# Instalar explicitamente aiofiles, que é uma dependência comum que estava faltando
+pip3 install -q aiofiles
+
+# Instalar dependências de todos os componentes
 echo -e "${YELLOW}Instalando dependências de teste...${NC}"
 pip3 install -q -r tests/requirements.txt
+
+echo -e "${YELLOW}Instalando dependências do Acceptor...${NC}"
+pip3 install -q -r acceptor/requirements.txt
+
+echo -e "${YELLOW}Instalando dependências do Proposer...${NC}"
+pip3 install -q -r proposer/requirements.txt
+
+echo -e "${YELLOW}Instalando dependências do Learner...${NC}"
+pip3 install -q -r learner/requirements.txt
+
+echo -e "${YELLOW}Instalando dependências do Store...${NC}"
+pip3 install -q -r store/requirements.txt
+
+echo -e "${YELLOW}Instalando dependências da Web UI...${NC}"
+pip3 install -q -r web-ui/backend/requirements.txt
 
 # Preparar ambiente de teste
 echo -e "${YELLOW}Preparando ambiente de teste...${NC}"
