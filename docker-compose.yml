@@ -1,0 +1,520 @@
+version: '3.8'
+
+services:
+  # Proposers (Cluster Sync) - 5 instâncias
+  proposer-1:
+    build:
+      context: .
+      dockerfile: proposer/Dockerfile
+    environment:
+      - NODE_ID=1
+      - NODE_ROLE=proposer
+      - QUORUM_SIZE=3
+      - DATA_DIR=/app/data
+    volumes:
+      - proposer_1_data:/app/data
+    ports:
+      - "8081:8080"
+    networks:
+      - paxos_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+
+  proposer-2:
+    build:
+      context: .
+      dockerfile: proposer/Dockerfile
+    environment:
+      - NODE_ID=2
+      - NODE_ROLE=proposer
+      - QUORUM_SIZE=3
+      - DATA_DIR=/app/data
+    volumes:
+      - proposer_2_data:/app/data
+    ports:
+      - "8082:8080"
+    networks:
+      - paxos_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+
+  proposer-3:
+    build:
+      context: .
+      dockerfile: proposer/Dockerfile
+    environment:
+      - NODE_ID=3
+      - NODE_ROLE=proposer
+      - QUORUM_SIZE=3
+      - DATA_DIR=/app/data
+    volumes:
+      - proposer_3_data:/app/data
+    ports:
+      - "8083:8080"
+    networks:
+      - paxos_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+
+  proposer-4:
+    build:
+      context: .
+      dockerfile: proposer/Dockerfile
+    environment:
+      - NODE_ID=4
+      - NODE_ROLE=proposer
+      - QUORUM_SIZE=3
+      - DATA_DIR=/app/data
+    volumes:
+      - proposer_4_data:/app/data
+    ports:
+      - "8084:8080"
+    networks:
+      - paxos_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+
+  proposer-5:
+    build:
+      context: .
+      dockerfile: proposer/Dockerfile
+    environment:
+      - NODE_ID=5
+      - NODE_ROLE=proposer
+      - QUORUM_SIZE=3
+      - DATA_DIR=/app/data
+    volumes:
+      - proposer_5_data:/app/data
+    ports:
+      - "8085:8080"
+    networks:
+      - paxos_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+
+  # Acceptors - 5 instâncias
+  acceptor-1:
+    build:
+      context: .
+      dockerfile: acceptor/Dockerfile
+    environment:
+      - NODE_ID=1
+      - NODE_ROLE=acceptor
+      - DATA_DIR=/app/data
+    volumes:
+      - acceptor_1_data:/app/data
+    ports:
+      - "8091:8080"
+    networks:
+      - paxos_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+
+  acceptor-2:
+    build:
+      context: .
+      dockerfile: acceptor/Dockerfile
+    environment:
+      - NODE_ID=2
+      - NODE_ROLE=acceptor
+      - DATA_DIR=/app/data
+    volumes:
+      - acceptor_2_data:/app/data
+    ports:
+      - "8092:8080"
+    networks:
+      - paxos_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+
+  acceptor-3:
+    build:
+      context: .
+      dockerfile: acceptor/Dockerfile
+    environment:
+      - NODE_ID=3
+      - NODE_ROLE=acceptor
+      - DATA_DIR=/app/data
+    volumes:
+      - acceptor_3_data:/app/data
+    ports:
+      - "8093:8080"
+    networks:
+      - paxos_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+
+  acceptor-4:
+    build:
+      context: .
+      dockerfile: acceptor/Dockerfile
+    environment:
+      - NODE_ID=4
+      - NODE_ROLE=acceptor
+      - DATA_DIR=/app/data
+    volumes:
+      - acceptor_4_data:/app/data
+    ports:
+      - "8094:8080"
+    networks:
+      - paxos_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+
+  acceptor-5:
+    build:
+      context: .
+      dockerfile: acceptor/Dockerfile
+    environment:
+      - NODE_ID=5
+      - NODE_ROLE=acceptor
+      - DATA_DIR=/app/data
+    volumes:
+      - acceptor_5_data:/app/data
+    ports:
+      - "8095:8080"
+    networks:
+      - paxos_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+
+  # Learners - 2 instâncias
+  learner-1:
+    build:
+      context: .
+      dockerfile: learner/Dockerfile
+    environment:
+      - NODE_ID=1
+      - NODE_ROLE=learner
+      - DATA_DIR=/app/data
+    volumes:
+      - learner_1_data:/app/data
+    ports:
+      - "8101:8080"
+    networks:
+      - paxos_network
+    depends_on:
+      - store-1
+      - store-2
+      - store-3
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+
+  learner-2:
+    build:
+      context: .
+      dockerfile: learner/Dockerfile
+    environment:
+      - NODE_ID=2
+      - NODE_ROLE=learner
+      - DATA_DIR=/app/data
+    volumes:
+      - learner_2_data:/app/data
+    ports:
+      - "8102:8080"
+    networks:
+      - paxos_network
+    depends_on:
+      - store-1
+      - store-2
+      - store-3
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+
+  # Cluster Store - 3 instâncias (Parte 2)
+  store-1:
+    build:
+      context: .
+      dockerfile: store/Dockerfile
+    environment:
+      - NODE_ID=1
+      - NODE_ROLE=store
+      - DATA_DIR=/app/data
+    volumes:
+      - store_1_data:/app/data
+    ports:
+      - "8111:8080"
+    networks:
+      - paxos_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+
+  store-2:
+    build:
+      context: .
+      dockerfile: store/Dockerfile
+    environment:
+      - NODE_ID=2
+      - NODE_ROLE=store
+      - DATA_DIR=/app/data
+    volumes:
+      - store_2_data:/app/data
+    ports:
+      - "8112:8080"
+    networks:
+      - paxos_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+
+  store-3:
+    build:
+      context: .
+      dockerfile: store/Dockerfile
+    environment:
+      - NODE_ID=3
+      - NODE_ROLE=store
+      - DATA_DIR=/app/data
+    volumes:
+      - store_3_data:/app/data
+    ports:
+      - "8113:8080"
+    networks:
+      - paxos_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+
+  # Clientes - 5 instâncias
+  client-1:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    environment:
+      - CLIENT_ID=client-1
+      - PROPOSER_HOST=proposer-1
+      - PROPOSER_PORT=8080
+      - MIN_REQUESTS=10
+      - MAX_REQUESTS=50
+    networks:
+      - paxos_network
+    depends_on:
+      - proposer-1
+      - proposer-2
+      - proposer-3
+      - proposer-4
+      - proposer-5
+      - acceptor-1
+      - acceptor-2
+      - acceptor-3
+      - acceptor-4
+      - acceptor-5
+      - learner-1
+      - learner-2
+
+  client-2:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    environment:
+      - CLIENT_ID=client-2
+      - PROPOSER_HOST=proposer-2
+      - PROPOSER_PORT=8080
+      - MIN_REQUESTS=10
+      - MAX_REQUESTS=50
+    networks:
+      - paxos_network
+    depends_on:
+      - proposer-1
+      - proposer-2
+      - proposer-3
+      - proposer-4
+      - proposer-5
+      - acceptor-1
+      - acceptor-2
+      - acceptor-3
+      - acceptor-4
+      - acceptor-5
+      - learner-1
+      - learner-2
+
+  client-3:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    environment:
+      - CLIENT_ID=client-3
+      - PROPOSER_HOST=proposer-3
+      - PROPOSER_PORT=8080
+      - MIN_REQUESTS=10
+      - MAX_REQUESTS=50
+    networks:
+      - paxos_network
+    depends_on:
+      - proposer-1
+      - proposer-2
+      - proposer-3
+      - proposer-4
+      - proposer-5
+      - acceptor-1
+      - acceptor-2
+      - acceptor-3
+      - acceptor-4
+      - acceptor-5
+      - learner-1
+      - learner-2
+
+  client-4:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    environment:
+      - CLIENT_ID=client-4
+      - PROPOSER_HOST=proposer-4
+      - PROPOSER_PORT=8080
+      - MIN_REQUESTS=10
+      - MAX_REQUESTS=50
+    networks:
+      - paxos_network
+    depends_on:
+      - proposer-1
+      - proposer-2
+      - proposer-3
+      - proposer-4
+      - proposer-5
+      - acceptor-1
+      - acceptor-2
+      - acceptor-3
+      - acceptor-4
+      - acceptor-5
+      - learner-1
+      - learner-2
+
+  client-5:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    environment:
+      - CLIENT_ID=client-5
+      - PROPOSER_HOST=proposer-5
+      - PROPOSER_PORT=8080
+      - MIN_REQUESTS=10
+      - MAX_REQUESTS=50
+    networks:
+      - paxos_network
+    depends_on:
+      - proposer-1
+      - proposer-2
+      - proposer-3
+      - proposer-4
+      - proposer-5
+      - acceptor-1
+      - acceptor-2
+      - acceptor-3
+      - acceptor-4
+      - acceptor-5
+      - learner-1
+      - learner-2
+
+  # Monitoramento
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - paxos_network
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+
+  grafana:
+    image: grafana/grafana:latest
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - paxos_network
+    depends_on:
+      - prometheus
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+
+volumes:
+  proposer_1_data:
+  proposer_2_data:
+  proposer_3_data:
+  proposer_4_data:
+  proposer_5_data:
+  acceptor_1_data:
+  acceptor_2_data:
+  acceptor_3_data:
+  acceptor_4_data:
+  acceptor_5_data:
+  learner_1_data:
+  learner_2_data:
+  store_1_data:
+  store_2_data:
+  store_3_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  paxos_network:
+    driver: bridge
