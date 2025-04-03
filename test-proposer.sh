@@ -38,11 +38,12 @@ export LEARNERS="localhost:8091,localhost:8092"
 export STORES="localhost:8061,localhost:8062,localhost:8063"
 
 # Garante que módulos comuns estejam no PYTHONPATH
-export PYTHONPATH=$PYTHONPATH:$(pwd)
+export PYTHONPATH=$PYTHONPATH:$(pwd):$(pwd)/proposer:$(pwd)/common
 
 # Executa testes unitários
 echo -e "${YELLOW}Executando testes unitários...${NC}"
-if pytest -xvs $UNIT_TESTS_DIR; then
+cd proposer
+if PYTHONPATH=. pytest -xvs tests/unit; then
     echo -e "${GREEN}Testes unitários completados com sucesso!${NC}"
 else
     echo -e "${RED}Alguns testes unitários falharam.${NC}"
@@ -51,12 +52,15 @@ fi
 
 # Executa testes de integração
 echo -e "${YELLOW}Executando testes de integração...${NC}"
-if pytest -xvs $INTEGRATION_TESTS_DIR; then
+if PYTHONPATH=. pytest -xvs tests/integration; then
     echo -e "${GREEN}Testes de integração completados com sucesso!${NC}"
 else
     echo -e "${RED}Alguns testes de integração falharam.${NC}"
     TEST_FAILED=1
 fi
+
+# Retorna ao diretório original
+cd ..
 
 # Limpa arquivos temporários
 echo -e "${YELLOW}Limpando arquivos temporários...${NC}"
