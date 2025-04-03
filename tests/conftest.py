@@ -2,21 +2,22 @@
 Configuração global para testes.
 Contém fixtures compartilhadas entre testes unitários e de integração.
 """
-def pytest_addoption(parser):
-    """Adicionar opções específicas para testes de integração."""
-    parser.addoption(
-        "--runintegration", action="store_true", default=False, help="Executar testes de integração"
-    )
-
 import os
 import pytest
 import asyncio
 import json
 import logging
+import yaml
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Configurar logging para testes
 logging.basicConfig(level=logging.INFO)
+
+def pytest_addoption(parser):
+    """Adicionar opções específicas para testes de integração."""
+    parser.addoption(
+        "--runintegration", action="store_true", default=False, help="Executar testes de integração"
+    )
 
 # Garantir que fixtures assíncronas funcionem corretamente
 @pytest.fixture(scope="session")
@@ -29,6 +30,104 @@ def event_loop():
     except RuntimeError:
         # Fallback para caso o loop já esteja fechado
         yield asyncio.new_event_loop()
+
+@pytest.fixture(scope="session", autouse=True)
+def setup_test_environment():
+    """Prepara o ambiente para testes, criando diretórios e arquivos de configuração."""
+    # Crie os diretórios de configuração se não existirem
+    for module in ["acceptor", "proposer", "learner", "store"]:
+        os.makedirs(f"{module}/config", exist_ok=True)
+    
+    # Crie configurações básicas para testes
+    configs = {
+        "acceptor": {
+            "node": {"id": 1, "role": "acceptor"},
+            "storage": {"path": "/app/data/acceptor.json", "syncOnAccept": True},
+            "networking": {
+                "port": 8080,
+                "learners": ["learner-1:8080", "learner-2:8080", "learner-3:8080"]
+            }
+        },
+        "proposer": {
+            "node": {"id": 1, "role": "proposer"},
+            "paxos": {
+                "quorumSize": 3,
+                "batchSize": 10,
+                "batchDelayMs": 50,
+                "proposalTimeout": 2000
+            },
+            "networking": {
+                "port": 8080,
+                "acceptors": [
+                    "acceptor-1:8080", 
+                    "acceptor-2:8080", 
+                    "acceptor-3:8080", 
+                    "acceptor-4:8080", 
+                    "acceptor-5:8080"
+                ],
+                "learners": ["learner-1:8080", "learner-2:8080", "learner-3:8080"]
+            }
+        },
+        "learner": {
+            "node": {"id": 1, "role": "learner"},
+            "filesystem": {"metadataPath": "/app/data/metadata.json"},
+            "networking": {
+                "port": 8080,
+                "acceptors": [
+                    "acceptor-1:8080", 
+                    "acceptor-2:8080", 
+                    "acceptor-3:8080", 
+                    "acceptor-4:8080", 
+                    "acceptor-5:8080"
+                ],
+                "learners": ["learner-1:8080", "learner-2:8080"],
+                "stores": ["store-1:8080", "store-2:8080", "store-3:8080"]
+            },
+            "store": {"readQuorum": 1, "writeQuorum": 3},
+            "protocol": {
+                "preparationTimeout": 1000,
+                "commitTimeout": 2000,
+                "maxRetries": 3,
+                "retryBackoffMs": 500
+            }
+        },
+        "store": {
+            "node": {"id": 1, "role": "store"},
+            "storage": {
+                "path": "/app/data/store.json",
+                "resourcePath": "/app/resource",
+                "syncIntervalSeconds": 10
+            },
+            "networking": {
+                "port": 8080,
+                "learners": ["learner-1:8080", "learner-2:8080", "learner-3:8080"],
+                "stores": ["store-1:8080", "store-2:8080", "store-3:8080"]
+            },
+            "protocol": {
+                "readQuorum": 1,
+                "writeQuorum": 3,
+                "preparationTimeout": 1000,
+                "commitTimeout": 2000,
+                "heartbeatInterval": 2000,
+                "recoveryTimeout": 5000,
+                "maxRetries": 3,
+                "retryBackoffMs": 500
+            }
+        }
+    }
+    
+    # Salve as configurações em arquivos YAML
+    for module, config in configs.items():
+        with open(f"{module}/config/config.yaml", "w") as f:
+            yaml.dump(config, f, default_flow_style=False)
+    
+    yield
+    
+    # Limpeza opcional após todos os testes, se necessário
+    # for module in ["acceptor", "proposer", "learner", "store"]:
+    #     config_file = f"{module}/config/config.yaml"
+    #     if os.path.exists(config_file):
+    #         os.remove(config_file)
 
 @pytest.fixture
 def mock_config():
