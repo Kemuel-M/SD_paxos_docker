@@ -1,350 +1,588 @@
 """
-Implementação do componente Proposer do protocolo Paxos.
+Implementação principal do Proposer do algoritmo Paxos.
+Responsável por iniciar o processo de consenso e coordenar as fases do protocolo.
 """
-import asyncio
+import os
 import time
-import random
 import logging
-from typing import Dict, Any, List, Tuple, Optional, Set
+import asyncio
+import random
+from typing import Dict, List, Any, Optional, Tuple
+from collections import defaultdict
 
-from common.utils import HttpClient, get_random_wait_time, get_current_timestamp
-from common.metrics import proposer_metrics, time_and_count
-from common.models import (
-    ClientRequest,
-    PrepareRequest,
-    PromiseResponse,
-    AcceptRequest,
-    AcceptedResponse,
-    LearnMessage
-)
-from proposer import persistence
-from proposer.config import (
-    NODE_ID,
-    ACCEPTOR_ENDPOINTS,
-    LEARNER_ENDPOINTS,
-    QUORUM_SIZE,
-    RESOURCE_ACCESS_MIN_TIME,
-    RESOURCE_ACCESS_MAX_TIME
-)
+from common.communication import HttpClient, CircuitBreaker
+from common.utils import calculate_backoff, wait_with_backoff, current_timestamp
 
+# Configuração
+DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
+USE_CLUSTER_STORE = os.getenv("USE_CLUSTER_STORE", "false").lower() in ("true", "1", "yes")
+
+logger = logging.getLogger("proposer")
 
 class Proposer:
     """
-    Implementação do componente Proposer do protocolo Paxos.
-    """
-    def __init__(self, logger: logging.Logger, leader_election):
-        """
-        Inicializa o proposer.
-        
-        Args:
-            logger: Logger configurado.
-            leader_election: Instância do LeaderElection.
-        """
-        self.logger = logger
-        self.leader_election = leader_election
-        
-        # Contador de propostas (persistente)
-        self.proposal_counter = 0
-        
-        # Contador de instâncias (persistente)
-        self.last_instance_id = 0
-        
-        # Cache de propostas ativas
-        self.active_proposals = {}
-        
-        # Clientes HTTP para acceptors e learners
-        self.acceptor_clients = {
-            endpoint: HttpClient(endpoint) for endpoint in ACCEPTOR_ENDPOINTS
-        }
-        self.learner_clients = {
-            endpoint: HttpClient(endpoint) for endpoint in LEARNER_ENDPOINTS
-        }
+    Implementação do Proposer do algoritmo Paxos.
     
-    async def initialize(self):
+    O Proposer é responsável por:
+    1. Receber requisições de clientes
+    2. Iniciar o processo de consenso (fases Prepare e Accept)
+    3. Coordenar com Acceptors para chegar a um consenso
+    4. Gerenciar o estado das propostas em andamento
+    """
+    
+    def __init__(self, node_id: int, acceptors: List[str], learners: List[str], 
+                 stores: List[str], proposal_counter: int = 0, last_instance_id: int = 0):
         """
-        Inicializa o proposer carregando dados persistentes.
-        """
-        # Carregar contadores persistentes
-        self.proposal_counter = await persistence.load_proposal_counter()
-        self.last_instance_id = await persistence.load_instance_counter()
-        
-        self.logger.info(f"Proposer inicializado: proposal_counter={self.proposal_counter}, "
-                      f"last_instance_id={self.last_instance_id}")
-        
-    async def shutdown(self):
-        """
-        Finaliza o proposer, salvando dados persistentes.
-        """
-        # Salvar contadores persistentes
-        await persistence.save_proposal_counter(self.proposal_counter)
-        await persistence.save_instance_counter(self.last_instance_id)
-        
-        # Fechar conexões HTTP
-        for client in self.acceptor_clients.values():
-            await client.close()
-            
-        for client in self.learner_clients.values():
-            await client.close()
-        
-    async def generate_proposal_number(self) -> int:
-        """
-        Gera um número de proposta único.
-        
-        Returns:
-            Número de proposta único.
-        """
-        self.proposal_counter += 1
-        await persistence.save_proposal_counter(self.proposal_counter)
-        
-        # Formato: (contador << 8) | ID_Proposer
-        # Isso garante que cada proposer tenha números únicos
-        return (self.proposal_counter << 8) | NODE_ID
-        
-    async def get_last_instance_id(self) -> int:
-        """
-        Obtém o último ID de instância.
-        
-        Returns:
-            Último ID de instância.
-        """
-        return self.last_instance_id
-        
-    async def set_last_instance_id(self, instance_id: int):
-        """
-        Define o último ID de instância.
+        Inicializa o Proposer.
         
         Args:
-            instance_id: Novo valor para o último ID de instância.
+            node_id: ID único deste Proposer (1-5)
+            acceptors: Lista de endereços dos Acceptors
+            learners: Lista de endereços dos Learners
+            stores: Lista de endereços dos Cluster Stores
+            proposal_counter: Contador inicial de propostas
+            last_instance_id: Último ID de instância processado
         """
-        if instance_id > self.last_instance_id:
-            self.last_instance_id = instance_id
-            await persistence.save_instance_counter(self.last_instance_id)
-            
-    async def propose(self, request: ClientRequest) -> Tuple[bool, int]:
+        self.node_id = node_id
+        self.acceptors = acceptors
+        self.learners = learners
+        self.stores = stores
+        self.proposal_counter = proposal_counter
+        self.last_instance_id = last_instance_id
+        
+        # Estado das propostas (instanceId -> estado)
+        self.proposals = {}
+        
+        # Fila de propostas pendentes
+        self.pending_queue = asyncio.Queue()
+        
+        # Executor de propostas (background task)
+        self.executor_task = None
+        
+        # Cliente HTTP com circuit breaker
+        self.http_client = HttpClient()
+        
+        # Circuit breakers para cada endpoint (endereço -> circuitbreaker)
+        self.circuit_breakers = defaultdict(lambda: CircuitBreaker())
+        
+        # Estado atual do proposer
+        self.state = "initialized"
+        
+        # Indica se é o líder (será gerenciado pelo LeaderElection)
+        self.is_leader = False
+        
+        # Counter para round-robin dos nós do Cluster Store
+        self.store_index = 0
+        
+        logger.info(f"Proposer {node_id} inicializado com {len(acceptors)} acceptors, "
+                    f"{len(learners)} learners e {len(stores)} nós de armazenamento")
+    
+    async def start(self):
+        """Inicia o processador de propostas em background."""
+        self.state = "running"
+        self.executor_task = asyncio.create_task(self._proposal_executor())
+        logger.info(f"Processador de propostas iniciado")
+    
+    async def stop(self):
+        """Para o processador de propostas."""
+        if self.executor_task and not self.executor_task.done():
+            self.state = "stopping"
+            self.executor_task.cancel()
+            try:
+                await self.executor_task
+            except asyncio.CancelledError:
+                pass
+        self.state = "stopped"
+        logger.info(f"Processador de propostas parado")
+    
+    def set_leader(self, is_leader: bool):
+        """Define se este proposer é o líder."""
+        self.is_leader = is_leader
+        logger.info(f"Status de líder alterado para: {is_leader}")
+    
+    async def propose(self, client_request: Dict[str, Any]):
         """
-        Propõe uma requisição de cliente.
+        Recebe uma requisição de cliente e a adiciona à fila de processamento.
         
         Args:
-            request: Requisição do cliente.
-            
-        Returns:
-            Tupla (success, instance_id).
+            client_request: Requisição do cliente
         """
-        # Incrementar contador de instâncias
-        self.last_instance_id += 1
-        instance_id = self.last_instance_id
-        await persistence.save_instance_counter(self.last_instance_id)
+        # Gera um ID de instância único para esta proposta
+        instance_id = self.last_instance_id + 1
+        self.last_instance_id = instance_id
         
-        # Incrementar contador de propostas
-        proposer_metrics["proposals_total"].labels(node_id=NODE_ID).inc()
-        
-        # Verificar se sou o líder
-        if not self.leader_election.is_leader():
-            current_leader = self.leader_election.get_current_leader()
-            self.logger.info(f"Encaminhando proposta para o líder (node_id={current_leader})")
-            
-            # Implementar encaminhamento para o líder
-            # TODO: Implementar forwarding para o líder
-            # Por enquanto, vamos apenas seguir com a proposta como se fossemos o líder
-            
-        # Preparar dados da proposta
-        request_dict = request.dict()
-        
-        # Cache de proposta ativa
-        self.active_proposals[instance_id] = {
-            "request": request_dict,
-            "proposal_number": None,
-            "timestamp": get_current_timestamp(),
-            "expiry": get_current_timestamp() + 60000  # 60 segundos de validade
+        # Adiciona metadados à proposta
+        proposal = {
+            "instanceId": instance_id,
+            "clientRequest": client_request,
+            "status": "pending",
+            "created_at": time.time(),
+            "attempt": 0
         }
         
-        # Executar o protocolo Paxos
-        prepare_ok, highest_accepted_value = await self._prepare_phase(instance_id, request_dict)
+        # Armazena a proposta no cache
+        self.proposals[instance_id] = proposal
         
-        if not prepare_ok:
-            self.logger.warning(f"Fase prepare falhou para instance_id={instance_id}")
-            proposer_metrics["proposals_failure"].labels(node_id=NODE_ID).inc()
-            del self.active_proposals[instance_id]
-            return False, instance_id
-            
-        # Se algum valor já foi aceito em uma proposta anterior, usar esse valor
-        value_to_propose = highest_accepted_value if highest_accepted_value else request_dict
+        # Adiciona à fila de processamento
+        await self.pending_queue.put(instance_id)
         
-        accept_ok = await self._accept_phase(instance_id, value_to_propose)
+        logger.info(f"Proposta do cliente {client_request['clientId']} adicionada à fila "
+                    f"com instanceId {instance_id}")
+    
+    async def _proposal_executor(self):
+        """Loop de processamento de propostas pendentes."""
+        logger.info("Iniciando executor de propostas")
         
-        if not accept_ok:
-            self.logger.warning(f"Fase accept falhou para instance_id={instance_id}")
-            proposer_metrics["proposals_failure"].labels(node_id=NODE_ID).inc()
-            del self.active_proposals[instance_id]
-            return False, instance_id
-            
-        # Após consenso, simular acesso ao recurso na Parte 1
-        # Na Parte 2, a lógica será executada pelos learners
-        await self._simulate_resource_access()
-        
-        self.logger.info(f"Proposta bem-sucedida para instance_id={instance_id}")
-        proposer_metrics["proposals_success"].labels(node_id=NODE_ID).inc()
-        
-        # Limpar cache de proposta ativa
-        del self.active_proposals[instance_id]
-        
-        return True, instance_id
-        
-    async def _prepare_phase(self, instance_id: int, request: Dict[str, Any]) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        while True:
+            try:
+                # Obtém próxima proposta da fila
+                instance_id = await self.pending_queue.get()
+                proposal = self.proposals.get(instance_id)
+                
+                if not proposal:
+                    logger.warning(f"Proposta com instanceId {instance_id} não encontrada")
+                    self.pending_queue.task_done()
+                    continue
+                
+                logger.info(f"Processando proposta {instance_id}")
+                proposal["status"] = "processing"
+                
+                # Se somos o líder, podemos pular a fase Prepare (otimização do Multi-Paxos)
+                if self.is_leader and instance_id > 1:  # Pula fase Prepare para instâncias após a primeira
+                    logger.info(f"Líder otimizando protocolo para instanceId {instance_id}, pulando fase Prepare")
+                    accepted = await self._run_accept_phase(instance_id, proposal)
+                else:
+                    # Executar protocolo Paxos completo
+                    accepted = await self._run_paxos(instance_id, proposal)
+                
+                if accepted:
+                    # Na Parte 1, simula acesso ao recurso
+                    if not USE_CLUSTER_STORE:
+                        await self._simulate_resource_access()
+                        # Notifica cliente via learner
+                        await self._notify_client_via_learner(instance_id, proposal, "COMMITTED")
+                        proposal["status"] = "completed"
+                        logger.info(f"Proposta {instance_id} concluída com sucesso (simulação)")
+                    else:
+                        # Na Parte 2, envia ao Cluster Store via learner
+                        success = await self._access_cluster_store(instance_id, proposal)
+                        
+                        if success:
+                            proposal["status"] = "completed"
+                            logger.info(f"Proposta {instance_id} concluída com sucesso (acesso real)")
+                        else:
+                            proposal["status"] = "failed"
+                            logger.warning(f"Proposta {instance_id} falhou no acesso ao Cluster Store")
+                else:
+                    proposal["status"] = "failed"
+                    logger.warning(f"Proposta {instance_id} falhou no consenso Paxos")
+                    
+                    # Notifica cliente sobre falha
+                    await self._notify_client_via_learner(instance_id, proposal, "NOT_COMMITTED")
+                
+                # Marca como processada
+                self.pending_queue.task_done()
+                
+                # Limpa propostas antigas (mais de 1 hora)
+                self._cleanup_old_proposals()
+                
+            except asyncio.CancelledError:
+                logger.info("Executor de propostas cancelado")
+                break
+            except Exception as e:
+                logger.error(f"Erro no executor de propostas: {e}", exc_info=True)
+                await asyncio.sleep(1)  # Evita consumo excessivo de CPU em caso de erros
+    
+    async def _run_paxos(self, instance_id: int, proposal: Dict[str, Any]) -> bool:
         """
-        Executa a fase prepare do Paxos.
+        Executa o protocolo Paxos completo (fases Prepare e Accept).
         
         Args:
-            instance_id: ID da instância.
-            request: Requisição do cliente.
-            
+            instance_id: ID da instância Paxos
+            proposal: Dados da proposta
+        
         Returns:
-            Tupla (prepare_ok, highest_accepted_value).
+            bool: True se o consenso foi alcançado, False caso contrário
         """
-        prepare_start = time.time()
+        # Tenta até 3 vezes com números de proposta diferentes
+        for attempt in range(3):
+            try:
+                # Incrementa o contador de propostas
+                self.proposal_counter += 1
+                
+                # Gera número de proposta único (contador << 8 | ID)
+                proposal_number = (self.proposal_counter << 8) | self.node_id
+                
+                logger.info(f"Tentativa {attempt+1} para instância {instance_id} com proposal_number {proposal_number}")
+                
+                # Fase Prepare
+                prepare_result = await self._run_prepare_phase(instance_id, proposal_number, proposal)
+                
+                if not prepare_result["success"]:
+                    logger.warning(f"Fase Prepare falhou para instância {instance_id}, tentativa {attempt+1}")
+                    await asyncio.sleep(0.5 * (attempt + 1))  # Backoff exponencial simples
+                    continue
+                
+                # Fase Accept (usando valor aceito anteriormente se necessário)
+                highest_value = prepare_result.get("highest_value")
+                success = await self._run_accept_phase(instance_id, proposal, 
+                                                      proposal_number=proposal_number,
+                                                      value_override=highest_value)
+                
+                if success:
+                    return True
+                
+                logger.warning(f"Fase Accept falhou para instância {instance_id}, tentativa {attempt+1}")
+                await asyncio.sleep(0.5 * (attempt + 1))
+                
+            except Exception as e:
+                logger.error(f"Erro durante execução do Paxos para instância {instance_id}: {e}", exc_info=True)
+                await asyncio.sleep(0.5 * (attempt + 1))
         
-        # Gerar número de proposta único
-        proposal_number = await self.generate_proposal_number()
+        # Após 3 tentativas sem sucesso
+        proposal["attempt"] += 1
         
-        # Atualizar cache
-        self.active_proposals[instance_id]["proposal_number"] = proposal_number
+        # Se ainda não excedeu o limite de tentativas, coloca de volta na fila
+        if proposal["attempt"] < 3:
+            logger.info(f"Programando nova tentativa para proposta {instance_id} (tentativa {proposal['attempt']+1}/3)")
+            await asyncio.sleep(2 ** proposal["attempt"])  # Backoff exponencial entre tentativas
+            await self.pending_queue.put(instance_id)
+            return False
         
-        # Criar requisição prepare
-        prepare_request = {
+        logger.error(f"Proposta {instance_id} falhou após todas as tentativas")
+        return False
+    
+    async def _run_prepare_phase(self, instance_id: int, proposal_number: int, 
+                                proposal: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Executa a fase Prepare do Paxos.
+        
+        Args:
+            instance_id: ID da instância
+            proposal_number: Número da proposta
+            proposal: Dados da proposta
+        
+        Returns:
+            Dict[str, Any]: Resultado da fase Prepare
+            {
+                "success": bool,  # True se recebeu maioria de promises
+                "highest_value": Optional[Dict],  # Valor com maior número de proposta (se houver)
+                "promises": int,  # Número de promises recebidas
+                "highest_proposal": int  # Maior número de proposta recebido
+            }
+        """
+        logger.info(f"Iniciando fase Prepare para instância {instance_id} com número {proposal_number}")
+        
+        # Prepara mensagem para enviar aos acceptors
+        prepare_message = {
             "type": "PREPARE",
             "proposalNumber": proposal_number,
             "instanceId": instance_id,
-            "proposerId": NODE_ID,
-            "clientRequest": request
+            "proposerId": self.node_id,
+            "clientRequest": proposal["clientRequest"]
         }
         
-        # Enviar prepare para todos os acceptors
-        promises_received = 0
+        if DEBUG:
+            logger.debug(f"Prepare message: {prepare_message}")
+        
+        # Envia para todos os acceptors em paralelo
+        promises = []
         highest_accepted_proposal = -1
         highest_accepted_value = None
         
-        for endpoint, client in self.acceptor_clients.items():
-            try:
-                status, response = await client.post("/prepare", prepare_request)
-                
-                if status == 200 and response.get("accepted", False):
-                    promises_received += 1
-                    
-                    # Verificar se este acceptor já aceitou alguma proposta
-                    acceptor_highest = response.get("highestAccepted", -1)
-                    if acceptor_highest > highest_accepted_proposal and response.get("acceptedValue"):
-                        highest_accepted_proposal = acceptor_highest
-                        highest_accepted_value = response.get("acceptedValue")
-                        
-            except Exception as e:
-                self.logger.warning(f"Erro ao enviar prepare para {endpoint}: {e}")
-                
-        # Calcular duração da fase prepare
-        prepare_duration = time.time() - prepare_start
-        proposer_metrics["prepare_phase_duration"].labels(node_id=NODE_ID).observe(prepare_duration)
+        # Coleta as respostas
+        responses = await self._send_to_acceptors("/prepare", prepare_message)
         
-        # Verificar se recebemos promises da maioria
-        prepare_ok = promises_received >= QUORUM_SIZE
+        # Analisa as respostas
+        for response in responses:
+            if response and response.get("accepted") == True:
+                promises.append(response)
+                
+                # Verifica se tem valor aceito anteriormente
+                accepted_proposal = response.get("highestAccepted", -1)
+                if accepted_proposal > highest_accepted_proposal and "acceptedValue" in response:
+                    highest_accepted_proposal = accepted_proposal
+                    highest_accepted_value = response["acceptedValue"]
         
-        if prepare_ok:
-            self.logger.info(f"Fase prepare bem-sucedida para instance_id={instance_id}: {promises_received} promises")
+        # Verifica se obteve maioria (3 de 5)
+        success = len(promises) >= 3
+        
+        if success:
+            logger.info(f"Fase Prepare bem-sucedida: {len(promises)}/{len(self.acceptors)} promises recebidas")
         else:
-            self.logger.info(f"Fase prepare falhou para instance_id={instance_id}: apenas {promises_received} promises")
-            
-        return prepare_ok, highest_accepted_value
+            logger.warning(f"Fase Prepare falhou: apenas {len(promises)}/{len(self.acceptors)} promises recebidas")
         
-    async def _accept_phase(self, instance_id: int, value: Dict[str, Any]) -> bool:
+        return {
+            "success": success,
+            "highest_value": highest_accepted_value,
+            "promises": len(promises),
+            "highest_proposal": highest_accepted_proposal
+        }
+    
+    async def _run_accept_phase(self, instance_id: int, proposal: Dict[str, Any], 
+                               proposal_number: Optional[int] = None,
+                               value_override: Optional[Dict[str, Any]] = None) -> bool:
         """
-        Executa a fase accept do Paxos.
+        Executa a fase Accept do Paxos.
         
         Args:
-            instance_id: ID da instância.
-            value: Valor a ser proposto.
-            
+            instance_id: ID da instância
+            proposal: Dados da proposta
+            proposal_number: Número da proposta (se None, gera um novo)
+            value_override: Valor a usar em vez do original (para valores previamente aceitos)
+        
         Returns:
-            True se a fase accept foi bem-sucedida, False caso contrário.
+            bool: True se maioria aceitou, False caso contrário
         """
-        accept_start = time.time()
+        # Se não foi fornecido proposal_number, gera um novo
+        if proposal_number is None:
+            self.proposal_counter += 1
+            proposal_number = (self.proposal_counter << 8) | self.node_id
         
-        # Obter número de proposta do cache
-        proposal_number = self.active_proposals[instance_id]["proposal_number"]
+        # Determina o valor a propor
+        value = value_override if value_override is not None else proposal["clientRequest"]
         
-        # Criar requisição accept
-        accept_request = {
+        logger.info(f"Iniciando fase Accept para instância {instance_id} com número {proposal_number}")
+        
+        # Prepara mensagem para enviar aos acceptors
+        accept_message = {
             "type": "ACCEPT",
             "proposalNumber": proposal_number,
             "instanceId": instance_id,
-            "proposerId": NODE_ID,
+            "proposerId": self.node_id,
             "value": value
         }
         
-        # Enviar accept para todos os acceptors
-        accepts_received = 0
+        if DEBUG:
+            logger.debug(f"Accept message: {accept_message}")
         
-        for endpoint, client in self.acceptor_clients.items():
-            try:
-                status, response = await client.post("/accept", accept_request)
-                
-                if status == 200 and response.get("accepted", False):
-                    accepts_received += 1
-                    
-            except Exception as e:
-                self.logger.warning(f"Erro ao enviar accept para {endpoint}: {e}")
-                
-        # Calcular duração da fase accept
-        accept_duration = time.time() - accept_start
-        proposer_metrics["accept_phase_duration"].labels(node_id=NODE_ID).observe(accept_duration)
+        # Envia para todos os acceptors em paralelo
+        responses = await self._send_to_acceptors("/accept", accept_message)
         
-        # Verificar se recebemos accepts da maioria
-        accept_ok = accepts_received >= QUORUM_SIZE
+        # Conta quantos aceitaram
+        accepted_count = sum(1 for resp in responses if resp and resp.get("accepted") == True)
         
-        if accept_ok:
-            self.logger.info(f"Fase accept bem-sucedida para instance_id={instance_id}: {accepts_received} accepts")
+        # Verifica se obteve maioria (3 de 5)
+        success = accepted_count >= 3
+        
+        if success:
+            logger.info(f"Fase Accept bem-sucedida: {accepted_count}/{len(self.acceptors)} aceitaram")
         else:
-            self.logger.info(f"Fase accept falhou para instance_id={instance_id}: apenas {accepts_received} accepts")
-            
-        return accept_ok
+            logger.warning(f"Fase Accept falhou: apenas {accepted_count}/{len(self.acceptors)} aceitaram")
         
-    async def _simulate_resource_access(self):
+        return success
+    
+    async def _send_to_acceptors(self, endpoint: str, payload: Dict[str, Any]) -> List[Optional[Dict[str, Any]]]:
         """
-        Simula o acesso ao recurso R esperando entre 0.2 e 1.0 segundos.
-        Isso será substituído pelo acesso real ao recurso na Parte 2.
-        """
-        wait_time = get_random_wait_time(RESOURCE_ACCESS_MIN_TIME, RESOURCE_ACCESS_MAX_TIME)
-        self.logger.info(f"Simulando acesso ao recurso por {wait_time} segundos")
-        await asyncio.sleep(wait_time)
+        Envia requisições para todos os acceptors em paralelo.
         
-    def cleanup_expired_proposals(self):
-        """
-        Remove propostas expiradas do cache.
-        """
-        current_time = get_current_timestamp()
-        expired_keys = [
-            k for k, v in self.active_proposals.items() 
-            if v["expiry"] < current_time
-        ]
-        
-        for key in expired_keys:
-            self.logger.info(f"Removendo proposta expirada: instance_id={key}")
-            del self.active_proposals[key]
-            
-    def get_status(self) -> Dict[str, Any]:
-        """
-        Obtém o status atual do proposer.
+        Args:
+            endpoint: Endpoint a ser chamado (ex: "/prepare", "/accept")
+            payload: Dados a serem enviados
         
         Returns:
-            Status do proposer.
+            List[Optional[Dict[str, Any]]]: Lista de respostas (None para falhas)
         """
-        # Limpar propostas expiradas antes de retornar status
-        self.cleanup_expired_proposals()
+        # Cria tasks para todas as requisições em paralelo
+        tasks = []
+        for acceptor in self.acceptors:
+            url = f"http://{acceptor}{endpoint}"
+            cb = self.circuit_breakers[acceptor]
+            
+            # Adiciona a task com circuit breaker e retentativas
+            tasks.append(self._send_with_retry(url, payload, circuit_breaker=cb))
         
-        return {
-            "node_id": NODE_ID,
-            "role": "proposer",
-            "is_leader": self.leader_election.is_leader(),
-            "current_leader": self.leader_election.get_current_leader(),
-            "last_instance_id": self.last_instance_id,
-            "proposal_counter": self.proposal_counter,
-            "active_proposals_count": len(self.active_proposals),
-            "timestamp": get_current_timestamp()
+        # Executa todas as requisições em paralelo
+        return await asyncio.gather(*tasks, return_exceptions=True)
+    
+    async def _send_with_retry(self, url: str, payload: Dict[str, Any], 
+                             circuit_breaker: CircuitBreaker,
+                             max_retries: int = 3) -> Optional[Dict[str, Any]]:
+        """
+        Envia requisição HTTP com retentativas e circuit breaker.
+        
+        Args:
+            url: URL de destino
+            payload: Dados a serem enviados
+            circuit_breaker: CircuitBreaker para o destino
+            max_retries: Número máximo de tentativas
+        
+        Returns:
+            Optional[Dict[str, Any]]: Resposta ou None em caso de falha
+        """
+        # Verifica se o circuit breaker está aberto
+        if not circuit_breaker.allow_request():
+            logger.warning(f"Circuit breaker aberto para {url}, ignorando requisição")
+            return None
+        
+        # Tenta enviar a requisição com retentativas
+        for attempt in range(max_retries):
+            try:
+                # Adiciona jitter ao timeout (480-520ms)
+                timeout = 0.5 + (random.random() * 0.04 - 0.02)
+                
+                # Faz a requisição com timeout
+                start_time = time.time()
+                response = await self.http_client.post(url, json=payload, timeout=timeout)
+                elapsed = time.time() - start_time
+                
+                # Registra sucesso no circuit breaker
+                await circuit_breaker.record_success()
+                
+                if DEBUG:
+                    logger.debug(f"Requisição para {url} concluída em {elapsed:.3f}s")
+                
+                return response
+                
+            except Exception as e:
+                # Registra falha no circuit breaker
+                await circuit_breaker.record_failure()
+                
+                logger.warning(f"Falha ao chamar {url}, tentativa {attempt+1}/{max_retries}: {e}")
+                
+                # Calcula tempo de espera com backoff exponencial e jitter
+                backoff_time = calculate_backoff(attempt)
+                
+                if attempt < max_retries - 1:
+                    logger.info(f"Aguardando {backoff_time:.2f}s antes da próxima tentativa")
+                    await asyncio.sleep(backoff_time)
+        
+        return None
+    
+    async def _simulate_resource_access(self):
+        """
+        Simula o acesso ao recurso (apenas na Parte 1).
+        Espera entre 0.2 e 1.0 segundos.
+        """
+        delay = 0.2 + random.random() * 0.8
+        logger.info(f"Simulando acesso ao recurso por {delay:.3f} segundos")
+        await asyncio.sleep(delay)
+    
+    async def _access_cluster_store(self, instance_id: int, proposal: Dict[str, Any]) -> bool:
+        """
+        Acessa o Cluster Store para escrita real (Parte 2).
+        
+        Args:
+            instance_id: ID da instância
+            proposal: Dados da proposta
+        
+        Returns:
+            bool: True se acesso bem-sucedido, False caso contrário
+        """
+        # Seleciona um nó do Cluster Store via round-robin
+        if not self.stores:
+            logger.error("Nenhum nó do Cluster Store configurado")
+            return False
+        
+        # Seleciona próximo nó via round-robin
+        self.store_index = (self.store_index + 1) % len(self.stores)
+        selected_store = self.stores[self.store_index]
+        
+        logger.info(f"Acessando Cluster Store {selected_store} para instância {instance_id}")
+        
+        try:
+            # Em vez de acessar diretamente, delegamos ao Learner
+            # que implementa o protocolo ROWA para replicação
+            await self._notify_learner_for_cluster_access(instance_id, proposal, selected_store)
+            return True
+        except Exception as e:
+            logger.error(f"Erro ao acessar Cluster Store: {e}", exc_info=True)
+            return False
+    
+    async def _notify_client_via_learner(self, instance_id: int, proposal: Dict[str, Any], status: str):
+        """
+        Notifica o cliente via Learner sobre o resultado da operação.
+        
+        Args:
+            instance_id: ID da instância
+            proposal: Dados da proposta
+            status: Status da operação (COMMITTED/NOT_COMMITTED)
+        """
+        client_id = proposal["clientRequest"].get("clientId", "unknown")
+        
+        # Determina qual learner deve notificar este cliente
+        # Usa hash do clientId para distribuição consistente
+        learner_index = hash(client_id) % len(self.learners)
+        learner = self.learners[learner_index]
+        
+        logger.info(f"Notificando cliente {client_id} via learner {learner} com status {status}")
+        
+        notification = {
+            "type": "NOTIFY_CLIENT",
+            "instanceId": instance_id,
+            "clientId": client_id,
+            "status": status,
+            "timestamp": current_timestamp(),
+            "resource": proposal["clientRequest"].get("resource")
         }
+        
+        try:
+            url = f"http://{learner}/notify-client"
+            await self.http_client.post(url, json=notification, timeout=1.0)
+        except Exception as e:
+            logger.error(f"Erro ao notificar cliente via learner: {e}")
+    
+    async def _notify_learner_for_cluster_access(self, instance_id: int, proposal: Dict[str, Any], selected_store: str):
+        """
+        Notifica o Learner para acessar o Cluster Store.
+        
+        Args:
+            instance_id: ID da instância
+            proposal: Dados da proposta
+            selected_store: Nó do Cluster Store selecionado
+        """
+        client_id = proposal["clientRequest"].get("clientId", "unknown")
+        
+        # Determina qual learner deve processar esta operação
+        # Usa hash do instanceId para distribuição equilibrada
+        learner_index = hash(str(instance_id)) % len(self.learners)
+        learner = self.learners[learner_index]
+        
+        logger.info(f"Delegando acesso ao Cluster Store {selected_store} para learner {learner}")
+        
+        access_request = {
+            "type": "CLUSTER_ACCESS",
+            "instanceId": instance_id,
+            "clientId": client_id,
+            "operation": proposal["clientRequest"].get("operation", "WRITE"),
+            "resource": proposal["clientRequest"].get("resource"),
+            "data": proposal["clientRequest"].get("data"),
+            "timestamp": current_timestamp(),
+            "selectedStore": selected_store
+        }
+        
+        try:
+            url = f"http://{learner}/cluster-access"
+            response = await self.http_client.post(url, json=access_request, timeout=2.0)
+            
+            # Verifica resultado
+            if response.get("status") == "success":
+                logger.info(f"Acesso ao Cluster Store bem-sucedido via learner {learner}")
+                return True
+            else:
+                logger.warning(f"Acesso ao Cluster Store falhou: {response.get('message', 'Sem detalhes')}")
+                return False
+        except Exception as e:
+            logger.error(f"Erro ao delegar acesso ao Cluster Store para learner: {e}")
+            return False
+    
+    def _cleanup_old_proposals(self, max_age: float = 3600):
+        """
+        Remove propostas antigas do cache.
+        
+        Args:
+            max_age: Idade máxima em segundos
+        """
+        now = time.time()
+        to_remove = []
+        
+        for instance_id, proposal in self.proposals.items():
+            age = now - proposal.get("created_at", now)
+            if age > max_age:
+                to_remove.append(instance_id)
+        
+        for instance_id in to_remove:
+            del self.proposals[instance_id]
+        
+        if to_remove and DEBUG:
+            logger.debug(f"Removidas {len(to_remove)} propostas antigas do cache")

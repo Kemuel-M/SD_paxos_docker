@@ -2,36 +2,26 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install utilities
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements file
-COPY proposer/requirements.txt .
-
-# Install dependencies
+# Instala dependências
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Create proper structure
-RUN mkdir -p /app/proposer
+# Copia código fonte
+COPY . .
 
-# Copy code - make sure files go to right locations
-COPY proposer/__init__.py /app/proposer/
-COPY proposer/config.py /app/proposer/
-COPY proposer/persistence.py /app/proposer/
-COPY proposer/proposer.py /app/proposer/
-COPY proposer/leader.py /app/proposer/
-COPY proposer/main.py /app/
-COPY common/ /app/common/
+# Cria diretório para dados persistentes
+RUN mkdir -p /data
+VOLUME /data
 
-# Create data directory
-RUN mkdir -p /app/data
-VOLUME /app/data
+# Configuração do ambiente
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PORT=8080
+ENV NODE_ID=1
+ENV DEBUG=false
 
-# Make startup script executable
-RUN chmod +x startup.sh
-
-# Expose port
+# Expõe a porta
 EXPOSE 8080
 
-# Start command
-CMD ["./startup.sh"]
+# Comando para iniciar a aplicação
+CMD ["python", "main.py"]

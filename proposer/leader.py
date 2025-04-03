@@ -1,382 +1,467 @@
 """
-Lógica de eleição de líder para o componente Proposer.
+Implementação da lógica de eleição de líder para o algoritmo Multi-Paxos.
 """
-import asyncio
+import os
 import time
+import asyncio
 import logging
-from typing import Dict, Any, List, Optional, Tuple
+import random
+from typing import Dict, List, Any, Optional
 
-from common.utils import HttpClient
-from common.metrics import proposer_metrics
-from proposer import persistence
-from proposer.config import (
-    NODE_ID,
-    PROPOSER_ENDPOINTS,
-    ACCEPTOR_ENDPOINTS,
-    LEADER_HEARTBEAT_INTERVAL,
-    LEADER_TIMEOUT,
-    QUORUM_SIZE
-)
+from common.communication import HttpClient, CircuitBreaker
+from common.heartbeat import HeartbeatMonitor
 
+logger = logging.getLogger("proposer")
+DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
 
 class LeaderElection:
     """
-    Implementação da eleição de líder usando o próprio Paxos.
+    Implementação da eleição de líder para Multi-Paxos.
+    
+    Responsável por:
+    1. Detectar ausência do líder atual
+    2. Iniciar nova eleição quando necessário
+    3. Enviar heartbeats se for o líder
+    4. Receber heartbeats do líder
     """
-    def __init__(self, logger: logging.Logger, proposer_instance):
+    
+    def __init__(self, node_id: int, proposers: List[str], proposer, 
+                 current_leader: Optional[int] = None, current_term: int = 0):
         """
-        Inicializa a eleição de líder.
+        Inicializa o gerenciador de eleição de líder.
         
         Args:
-            logger: Logger configurado.
-            proposer_instance: Instância do proposer.
+            node_id: ID deste nó
+            proposers: Lista de endereços de todos os proposers
+            proposer: Referência para o objeto Proposer
+            current_leader: ID do líder atual, se conhecido
+            current_term: Termo atual da eleição
         """
-        self.logger = logger
-        self.proposer = proposer_instance
-        self.state = {
-            "is_leader": False,
-            "current_leader_id": None,
-            "term": 0,
-            "last_heartbeat": 0
-        }
-        self.clients = {
-            endpoint: HttpClient(endpoint) for endpoint in PROPOSER_ENDPOINTS
-        }
-        self.acceptor_clients = {
-            endpoint: HttpClient(endpoint) for endpoint in ACCEPTOR_ENDPOINTS
-        }
-        self.running = False
-        self.leader_task = None
+        self.node_id = node_id
+        self.proposers = proposers
+        self.proposer = proposer
+        self.current_leader = current_leader
+        self.current_term = current_term
         
-    async def initialize(self):
-        """
-        Inicializa o estado de liderança a partir do disco.
-        """
-        self.state = await persistence.load_leadership_state()
+        # Cliente HTTP para comunicação
+        self.http_client = HttpClient()
+        
+        # Circuit breakers para proposers
+        self.circuit_breakers = {p: CircuitBreaker() for p in proposers}
+        
+        # Monitor de heartbeat para o líder
+        self.leader_monitor = HeartbeatMonitor(
+            target_description=f"Líder (proposer-{current_leader})" if current_leader else "Líder desconhecido",
+            failure_threshold=5,  # Considera líder como falho após 5 segundos sem heartbeat
+            on_failure=self._handle_leader_failure
+        )
+        
+        # Task de heartbeat (se for líder)
+        self.heartbeat_task = None
+        
+        # Flag para controle da execução
+        self.running = False
+        
+        # Tempo da última eleição iniciada
+        self.last_election_time = 0
+        
+        # Tempo da última vez que vimos o líder
+        self.last_leader_seen = 0 if current_leader is None else time.time()
+        
+        logger.info(f"Gerenciador de eleição inicializado. Líder atual: {current_leader}, Termo: {current_term}")
+    
+    async def start(self):
+        """Inicia o gerenciador de eleição de líder."""
+        if self.running:
+            return
+        
         self.running = True
         
-    async def start_background_tasks(self):
-        """
-        Inicia as tarefas de background para monitoramento e heartbeat.
-        """
-        if self.leader_task:
-            self.leader_task.cancel()
-            
-        self.leader_task = asyncio.create_task(self.leader_monitor_task())
+        # Inicia o monitor de heartbeat
+        if self.current_leader is not None and self.current_leader != self.node_id:
+            self.leader_monitor.start()
         
-    async def shutdown(self):
-        """
-        Finaliza as tarefas de background e fecha as conexões.
-        """
+        # Se formos o líder, inicia envio de heartbeats
+        if self.current_leader == self.node_id:
+            await self._become_leader()
+        
+        # Inicia o detector de líder
+        asyncio.create_task(self._leader_detector_loop())
+        
+        logger.info(f"Gerenciador de eleição iniciado")
+    
+    async def stop(self):
+        """Para o gerenciador de eleição de líder."""
         self.running = False
         
-        if self.leader_task:
-            self.leader_task.cancel()
+        # Para o monitor de heartbeat
+        self.leader_monitor.stop()
+        
+        # Cancela a task de heartbeat se existir
+        if self.heartbeat_task and not self.heartbeat_task.done():
+            self.heartbeat_task.cancel()
             try:
-                await self.leader_task
+                await self.heartbeat_task
             except asyncio.CancelledError:
                 pass
-                
-        for client in self.clients.values():
-            await client.close()
-            
-        for client in self.acceptor_clients.values():
-            await client.close()
-            
-        await persistence.save_leadership_state(self.state)
         
-    async def leader_monitor_task(self):
+        logger.info(f"Gerenciador de eleição parado")
+    
+    def is_leader(self) -> bool:
+        """Retorna se este nó é o líder atual."""
+        return self.current_leader == self.node_id
+    
+    async def receive_heartbeat(self, data: Dict[str, Any]):
         """
-        Tarefa de background para monitoramento do líder e heartbeat.
-        """
-        try:
-            while self.running:
-                # Se eu sou o líder, enviar heartbeats
-                if self.state["is_leader"]:
-                    await self._send_leader_heartbeats()
-                    await asyncio.sleep(LEADER_HEARTBEAT_INTERVAL)
-                else:
-                    # Se não sou o líder, verificar se o líder atual está respondendo
-                    leader_alive = await self._check_leader_alive()
-                    
-                    if not leader_alive:
-                        # Iniciar eleição se o líder atual não estiver respondendo
-                        await self._start_election()
-                        
-                    await asyncio.sleep(LEADER_TIMEOUT)
-        except asyncio.CancelledError:
-            # Tarefa cancelada, finalizar graciosamente
-            self.logger.info("Tarefa de monitoramento de líder cancelada")
-        except Exception as e:
-            self.logger.error(f"Erro na tarefa de monitoramento de líder: {e}")
-            # Reiniciar a tarefa em caso de erro
-            if self.running:
-                self.leader_task = asyncio.create_task(self.leader_monitor_task())
-                
-    async def _send_leader_heartbeats(self):
-        """
-        Envia heartbeats para todos os outros proposers.
-        """
-        current_time = int(time.time() * 1000)
-        leader_status = {
-            "leaderId": NODE_ID,
-            "term": self.state["term"],
-            "lastInstanceId": await self.proposer.get_last_instance_id()
-        }
-        
-        for endpoint, client in self.clients.items():
-            try:
-                status, _ = await client.post("/leader-status", leader_status)
-                if status != 200:
-                    self.logger.warning(f"Falha ao enviar heartbeat para {endpoint}: status {status}")
-            except Exception as e:
-                self.logger.warning(f"Erro ao enviar heartbeat para {endpoint}: {e}")
-                
-    async def _check_leader_alive(self) -> bool:
-        """
-        Verifica se o líder atual está respondendo.
-        
-        Returns:
-            True se o líder estiver respondendo, False caso contrário.
-        """
-        if self.state["current_leader_id"] is None:
-            return False
-            
-        current_time = int(time.time() * 1000)
-        
-        # Verificar se recebemos heartbeat recentemente
-        if current_time - self.state["last_heartbeat"] > LEADER_TIMEOUT * 1000:
-            self.logger.info(f"Líder {self.state['current_leader_id']} considerado inativo: "
-                           f"último heartbeat há {(current_time - self.state['last_heartbeat'])/1000} segundos")
-            return False
-            
-        return True
-        
-    async def _start_election(self):
-        """
-        Inicia uma eleição de líder usando o próprio Paxos.
-        """
-        self.logger.info("Iniciando eleição de líder")
-        
-        # Incrementar o termo
-        self.state["term"] += 1
-        current_time = int(time.time() * 1000)
-        
-        # Propor a si mesmo como líder
-        election_value = {
-            "proposerId": NODE_ID,
-            "timestamp": current_time,
-            "term": self.state["term"]
-        }
-        
-        # Usar a instância 0 do Paxos para eleição de líder
-        instance_id = 0
-        
-        # Fases do Paxos para eleição de líder
-        prepare_ok, highest_accepted_value = await self._paxos_prepare_phase(instance_id)
-        
-        if not prepare_ok:
-            self.logger.info("Fase prepare da eleição falhou")
-            return False
-            
-        # Se algum valor já foi aceito com um proposerId maior, usar esse valor
-        if highest_accepted_value and highest_accepted_value.get("proposerId", 0) > NODE_ID:
-            election_value = highest_accepted_value
-            
-        accept_ok = await self._paxos_accept_phase(instance_id, election_value)
-        
-        if not accept_ok:
-            self.logger.info("Fase accept da eleição falhou")
-            return False
-            
-        # Verificar se ganhei a eleição
-        if election_value["proposerId"] == NODE_ID:
-            old_leader = self.state["current_leader_id"]
-            self.state["is_leader"] = True
-            self.state["current_leader_id"] = NODE_ID
-            self.state["last_heartbeat"] = current_time
-            
-            if old_leader != NODE_ID:
-                self.logger.info(f"Eleito como novo líder com termo {self.state['term']}")
-                proposer_metrics["leadership_changes"].labels(node_id=NODE_ID).inc()
-                
-            await persistence.save_leadership_state(self.state)
-            return True
-        else:
-            # Outro proposer foi eleito
-            self.state["is_leader"] = False
-            self.state["current_leader_id"] = election_value["proposerId"]
-            self.state["last_heartbeat"] = current_time
-            
-            self.logger.info(f"Proposer {election_value['proposerId']} eleito como líder com termo {self.state['term']}")
-            
-            await persistence.save_leadership_state(self.state)
-            return False
-            
-    async def _paxos_prepare_phase(self, instance_id: int) -> Tuple[bool, Optional[Dict[str, Any]]]:
-        """
-        Executa a fase prepare do Paxos para eleição de líder.
+        Recebe heartbeat do líder.
         
         Args:
-            instance_id: ID da instância Paxos (0 para eleição).
-            
-        Returns:
-            Tupla (prepare_ok, highest_accepted_value).
+            data: Dados do heartbeat
+            {
+                "leaderId": int,
+                "term": int,
+                "lastInstanceId": int
+            }
         """
-        prepare_start = time.time()
+        leader_id = data.get("leaderId")
+        term = data.get("term", 0)
+        last_instance_id = data.get("lastInstanceId", 0)
         
-        # Gerar número de proposta único
-        proposal_number = await self.proposer.generate_proposal_number()
+        # Ignora heartbeats de termos anteriores
+        if term < self.current_term:
+            logger.warning(f"Recebido heartbeat com termo {term} menor que o atual {self.current_term}. Ignorando.")
+            return
         
-        # Criar requisição prepare
-        prepare_request = {
+        # Se o termo é maior, reconhece o novo líder
+        if term > self.current_term or self.current_leader != leader_id:
+            logger.info(f"Reconhecendo novo líder: {leader_id} (termo {term})")
+            self.current_term = term
+            
+            # Atualiza o líder
+            old_leader = self.current_leader
+            self.current_leader = leader_id
+            
+            # Para de ser líder se era antes
+            if old_leader == self.node_id:
+                await self._stop_being_leader()
+            
+            # Atualiza o monitor
+            if leader_id != self.node_id:
+                self.leader_monitor.set_target(f"Líder (proposer-{leader_id})")
+                self.leader_monitor.start()
+        
+        # Atualiza o último instanceId se necessário
+        if last_instance_id > self.proposer.last_instance_id:
+            logger.info(f"Atualizando último instanceId de {self.proposer.last_instance_id} para {last_instance_id}")
+            self.proposer.last_instance_id = last_instance_id
+        
+        # Marca que vimos o líder
+        self.last_leader_seen = time.time()
+        self.leader_monitor.record_heartbeat()
+    
+    async def _leader_detector_loop(self):
+        """Loop para detectar ausência de líder e iniciar eleição quando necessário."""
+        logger.info(f"Iniciando detector de líder")
+        
+        while self.running:
+            try:
+                # Se não temos líder ou o líder está com problemas
+                if self.current_leader is None or (
+                    self.current_leader != self.node_id and 
+                    time.time() - self.last_leader_seen > 5  # 5 segundos sem ver o líder
+                ):
+                    # Verifica se podemos iniciar eleição (evita tempestade de eleições)
+                    if time.time() - self.last_election_time > 5:  # No máximo uma eleição a cada 5 segundos
+                        logger.warning(f"Líder ausente por mais de 5 segundos. Iniciando eleição.")
+                        await self._start_election()
+                
+                await asyncio.sleep(1)  # Verifica a cada segundo
+                
+            except Exception as e:
+                logger.error(f"Erro no detector de líder: {e}", exc_info=True)
+                await asyncio.sleep(1)
+    
+    async def _start_election(self):
+        """Inicia uma nova eleição."""
+        # Marca o tempo da eleição
+        self.last_election_time = time.time()
+        
+        # Incrementa o termo
+        self.current_term += 1
+        term = self.current_term
+        
+        logger.info(f"Iniciando eleição para o termo {term}")
+        
+        # Usa a instância 0 especial para eleição
+        instance_id = 0
+        
+        # Valor da proposta é o próprio ID com timestamp
+        value = {
+            "proposerId": self.node_id,
+            "timestamp": int(time.time() * 1000)
+        }
+        
+        # Gera número de proposta único para esta eleição
+        self.proposer.proposal_counter += 1
+        proposal_number = (self.proposer.proposal_counter << 8) | self.node_id
+        
+        # Prepara mensagem para fase Prepare
+        prepare_message = {
             "type": "PREPARE",
             "proposalNumber": proposal_number,
             "instanceId": instance_id,
-            "proposerId": NODE_ID,
-            "clientRequest": {
-                "type": "LEADER_ELECTION",
-                "term": self.state["term"]
-            }
+            "proposerId": self.node_id,
+            "term": term
         }
         
-        # Enviar prepare para todos os acceptors
-        promises_received = 0
+        # Envia Prepare para todos os acceptors
+        responses = await self._send_to_acceptors("/prepare", prepare_message)
+        
+        # Analisa as respostas
+        promises = []
         highest_accepted_proposal = -1
         highest_accepted_value = None
         
-        for endpoint, client in self.acceptor_clients.items():
-            try:
-                status, response = await client.post("/prepare", prepare_request)
+        for response in responses:
+            if response and response.get("accepted") == True:
+                promises.append(response)
                 
-                if status == 200 and response.get("accepted", False):
-                    promises_received += 1
-                    
-                    # Verificar se este acceptor já aceitou alguma proposta
-                    acceptor_highest = response.get("highestAccepted", -1)
-                    if acceptor_highest > highest_accepted_proposal and response.get("acceptedValue"):
-                        highest_accepted_proposal = acceptor_highest
-                        highest_accepted_value = response.get("acceptedValue")
-                        
-            except Exception as e:
-                self.logger.warning(f"Erro ao enviar prepare para {endpoint}: {e}")
-                
-        # Calcular duração da fase prepare
-        prepare_duration = time.time() - prepare_start
-        proposer_metrics["prepare_phase_duration"].labels(node_id=NODE_ID).observe(prepare_duration)
+                # Verifica se tem valor aceito anteriormente
+                accepted_proposal = response.get("highestAccepted", -1)
+                if accepted_proposal > highest_accepted_proposal and "acceptedValue" in response:
+                    highest_accepted_proposal = accepted_proposal
+                    highest_accepted_value = response["acceptedValue"]
         
-        # Verificar se recebemos promises da maioria
-        prepare_ok = promises_received >= QUORUM_SIZE
+        # Verifica se obteve maioria (3 de 5)
+        if len(promises) < 3:
+            logger.warning(f"Eleição falhou: apenas {len(promises)}/{len(self.proposer.acceptors)} promises recebidas")
+            return
         
-        if prepare_ok:
-            self.logger.info(f"Fase prepare da eleição bem-sucedida: {promises_received} promises")
-        else:
-            self.logger.info(f"Fase prepare da eleição falhou: apenas {promises_received} promises")
-            
-        return prepare_ok, highest_accepted_value
+        # Determina o valor a propor (usa o valor aceito com maior número se existir)
+        if highest_accepted_value is not None:
+            # Se já existe valor aceito, usa-o (mantém o líder já eleito)
+            value = highest_accepted_value
+            logger.info(f"Usando valor previamente aceito: proposer-{value.get('proposerId')}")
         
-    async def _paxos_accept_phase(self, instance_id: int, election_value: Dict[str, Any]) -> bool:
-        """
-        Executa a fase accept do Paxos para eleição de líder.
-        
-        Args:
-            instance_id: ID da instância Paxos (0 para eleição).
-            election_value: Valor da eleição a ser proposto.
-            
-        Returns:
-            True se a fase accept foi bem-sucedida, False caso contrário.
-        """
-        accept_start = time.time()
-        
-        # Gerar número de proposta único
-        proposal_number = await self.proposer.generate_proposal_number()
-        
-        # Criar requisição accept
-        accept_request = {
+        # Prepara mensagem para fase Accept
+        accept_message = {
             "type": "ACCEPT",
             "proposalNumber": proposal_number,
             "instanceId": instance_id,
-            "proposerId": NODE_ID,
-            "value": election_value
+            "proposerId": self.node_id,
+            "value": value,
+            "term": term
         }
         
-        # Enviar accept para todos os acceptors
-        accepts_received = 0
+        # Envia Accept para todos os acceptors
+        responses = await self._send_to_acceptors("/accept", accept_message)
         
-        for endpoint, client in self.acceptor_clients.items():
-            try:
-                status, response = await client.post("/accept", accept_request)
-                
-                if status == 200 and response.get("accepted", False):
-                    accepts_received += 1
-                    
-            except Exception as e:
-                self.logger.warning(f"Erro ao enviar accept para {endpoint}: {e}")
-                
-        # Calcular duração da fase accept
-        accept_duration = time.time() - accept_start
-        proposer_metrics["accept_phase_duration"].labels(node_id=NODE_ID).observe(accept_duration)
+        # Conta quantos aceitaram
+        accepted_count = sum(1 for resp in responses if resp and resp.get("accepted") == True)
         
-        # Verificar se recebemos accepts da maioria
-        accept_ok = accepts_received >= QUORUM_SIZE
+        # Verifica se obteve maioria (3 de 5)
+        if accepted_count < 3:
+            logger.warning(f"Eleição falhou: apenas {accepted_count}/{len(self.proposer.acceptors)} aceitaram")
+            return
         
-        if accept_ok:
-            self.logger.info(f"Fase accept da eleição bem-sucedida: {accepts_received} accepts")
+        # Determina o vencedor da eleição
+        winner_id = value.get("proposerId")
+        
+        logger.info(f"Eleição para o termo {term} concluída. Vencedor: proposer-{winner_id}")
+        
+        # Atualiza o líder
+        old_leader = self.current_leader
+        self.current_leader = winner_id
+        
+        # Se éramos o líder e não somos mais
+        if old_leader == self.node_id and winner_id != self.node_id:
+            await self._stop_being_leader()
+        
+        # Se não éramos o líder e agora somos
+        if old_leader != self.node_id and winner_id == self.node_id:
+            await self._become_leader()
+        
+        # Atualiza o Proposer
+        self.proposer.set_leader(self.is_leader())
+        
+        # Atualiza o monitor de heartbeat
+        if winner_id != self.node_id:
+            self.leader_monitor.set_target(f"Líder (proposer-{winner_id})")
+            self.leader_monitor.start()
         else:
-            self.logger.info(f"Fase accept da eleição falhou: apenas {accepts_received} accepts")
-            
-        return accept_ok
+            self.leader_monitor.stop()
+    
+    async def _become_leader(self):
+        """Ações a serem tomadas quando este nó se torna líder."""
+        logger.info(f"Este nó agora é o líder para o termo {self.current_term}")
         
-    async def receive_leader_heartbeat(self, leader_id: int, term: int, last_instance_id: int):
+        # Atualiza o proposer
+        self.proposer.set_leader(True)
+        
+        # Para o monitor de heartbeat (não precisamos monitorar a nós mesmos)
+        self.leader_monitor.stop()
+        
+        # Inicia envio de heartbeats periódicos
+        self.heartbeat_task = asyncio.create_task(self._send_heartbeats_loop())
+    
+    async def _stop_being_leader(self):
+        """Ações a serem tomadas quando este nó deixa de ser líder."""
+        logger.info(f"Este nó não é mais o líder")
+        
+        # Atualiza o proposer
+        self.proposer.set_leader(False)
+        
+        # Cancela a task de heartbeat
+        if self.heartbeat_task and not self.heartbeat_task.done():
+            self.heartbeat_task.cancel()
+            try:
+                await self.heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            self.heartbeat_task = None
+    
+    async def _send_heartbeats_loop(self):
+        """Loop para enviar heartbeats periódicos para outros proposers."""
+        logger.info(f"Iniciando envio de heartbeats como líder")
+        
+        while self.running and self.is_leader():
+            try:
+                # Prepara dados do heartbeat
+                heartbeat_data = {
+                    "leaderId": self.node_id,
+                    "term": self.current_term,
+                    "lastInstanceId": self.proposer.last_instance_id
+                }
+                
+                # Envia para todos os outros proposers
+                for i, proposer_addr in enumerate(self.proposers):
+                    proposer_id = i + 1  # IDs são 1-based
+                    
+                    # Não envia para si mesmo
+                    if proposer_id == self.node_id:
+                        continue
+                    
+                    # Envia heartbeat assíncrono (não bloqueia em caso de falha)
+                    asyncio.create_task(self._send_heartbeat(proposer_addr, heartbeat_data))
+                
+                # Espera 1 segundo antes do próximo heartbeat
+                await asyncio.sleep(1)
+                
+            except asyncio.CancelledError:
+                logger.info(f"Envio de heartbeats cancelado")
+                break
+            except Exception as e:
+                logger.error(f"Erro ao enviar heartbeats: {e}", exc_info=True)
+                await asyncio.sleep(1)
+    
+    async def _send_heartbeat(self, proposer_addr: str, data: Dict[str, Any]):
         """
-        Recebe um heartbeat do líder atual.
+        Envia heartbeat para um proposer específico.
         
         Args:
-            leader_id: ID do líder.
-            term: Termo do líder.
-            last_instance_id: Último ID de instância do líder.
+            proposer_addr: Endereço do proposer
+            data: Dados do heartbeat
         """
-        current_time = int(time.time() * 1000)
+        url = f"http://{proposer_addr}/leader-heartbeat"
+        cb = self.circuit_breakers.get(proposer_addr)
         
-        # Verificar se o termo é maior que o atual
-        if term > self.state["term"]:
-            # Atualizar termo e reconhecer o novo líder
-            old_leader = self.state["current_leader_id"]
-            self.state["term"] = term
-            self.state["is_leader"] = False
-            self.state["current_leader_id"] = leader_id
-            self.state["last_heartbeat"] = current_time
+        # Verifica se o circuit breaker permite requisição
+        if cb and not cb.allow_request():
+            if DEBUG:
+                logger.debug(f"Circuit breaker aberto para {proposer_addr}, ignorando heartbeat")
+            return
+        
+        try:
+            # Timeout mais curto para heartbeats (300ms)
+            response = await self.http_client.post(url, json=data, timeout=0.3)
             
-            if old_leader != leader_id:
-                self.logger.info(f"Novo líder {leader_id} reconhecido com termo {term}")
-                
-            await persistence.save_leadership_state(self.state)
-        elif term == self.state["term"]:
-            # Mesmo termo, atualizar heartbeat
-            if self.state["current_leader_id"] != leader_id:
-                self.logger.warning(f"Conflito de líderes detectado: {self.state['current_leader_id']} vs {leader_id}")
-                
-            self.state["current_leader_id"] = leader_id
-            self.state["last_heartbeat"] = current_time
+            # Registra sucesso no circuit breaker
+            if cb:
+                cb.record_success()
             
-        # Atualizar o último ID de instância conhecido do líder
-        if last_instance_id > await self.proposer.get_last_instance_id():
-            await self.proposer.set_last_instance_id(last_instance_id)
+            if DEBUG:
+                logger.debug(f"Heartbeat enviado com sucesso para {proposer_addr}")
             
-    def is_leader(self) -> bool:
+        except Exception as e:
+            # Registra falha no circuit breaker
+            if cb:
+                cb.record_failure()
+            
+            if DEBUG:
+                logger.debug(f"Falha ao enviar heartbeat para {proposer_addr}: {e}")
+    
+    async def _send_to_acceptors(self, endpoint: str, payload: Dict[str, Any]) -> List[Optional[Dict[str, Any]]]:
         """
-        Verifica se este proposer é o líder atual.
+        Envia requisições para todos os acceptors em paralelo.
+        
+        Args:
+            endpoint: Endpoint a ser chamado (ex: "/prepare", "/accept")
+            payload: Dados a serem enviados
         
         Returns:
-            True se este proposer é o líder, False caso contrário.
+            List[Optional[Dict[str, Any]]]: Lista de respostas (None para falhas)
         """
-        return self.state["is_leader"]
+        # Cria tasks para todas as requisições em paralelo
+        tasks = []
+        for acceptor in self.proposer.acceptors:
+            url = f"http://{acceptor}{endpoint}"
+            
+            # Adiciona a task com circuit breaker e retentativas
+            tasks.append(self._send_with_retry(url, payload))
         
-    def get_current_leader(self) -> Optional[int]:
+        # Executa todas as requisições em paralelo
+        return await asyncio.gather(*tasks, return_exceptions=True)
+    
+    async def _send_with_retry(self, url: str, payload: Dict[str, Any], 
+                             max_retries: int = 3) -> Optional[Dict[str, Any]]:
         """
-        Obtém o ID do líder atual.
+        Envia requisição HTTP com retentativas.
+        
+        Args:
+            url: URL de destino
+            payload: Dados a serem enviados
+            max_retries: Número máximo de tentativas
         
         Returns:
-            ID do líder atual ou None se não houver líder.
+            Optional[Dict[str, Any]]: Resposta ou None em caso de falha
         """
-        return self.state["current_leader_id"]
+        # Tenta enviar a requisição com retentativas
+        for attempt in range(max_retries):
+            try:
+                # Adiciona jitter ao timeout (480-520ms)
+                timeout = 0.5 + (random.random() * 0.04 - 0.02)
+                
+                # Faz a requisição com timeout
+                response = await self.http_client.post(url, json=payload, timeout=timeout)
+                
+                return response
+                
+            except Exception as e:
+                logger.warning(f"Falha ao chamar {url}, tentativa {attempt+1}/{max_retries}: {e}")
+                
+                # Calcula tempo de espera com backoff exponencial e jitter
+                backoff_time = 0.5 * (2 ** attempt)  # 0.5s, 1s, 2s
+                jitter = backoff_time * 0.2 * random.random()  # ±20% de jitter
+                wait_time = backoff_time + jitter
+                
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(wait_time)
+        
+        return None
+    
+    async def _handle_leader_failure(self):
+        """Callback chamado quando o monitor de heartbeat detecta falha do líder."""
+        if not self.running:
+            return
+        
+        logger.warning(f"Falha do líder detectada pelo monitor de heartbeat")
+        
+        # Limpa o líder atual
+        self.current_leader = None
+        
+        # Atualiza o proposer
+        self.proposer.set_leader(False)
+        
+        # Inicia nova eleição
+        if time.time() - self.last_election_time > 5:  # Evita tempestade de eleições
+            await self._start_election()

@@ -1,136 +1,153 @@
-# Sistema de Consenso Distribuído Paxos em Docker
+# Proposer (Cluster Sync)
 
-Este projeto implementa um sistema de consenso distribuído baseado no algoritmo Paxos, dividido em duas partes:
+Este componente implementa o Proposer para o algoritmo de consenso Paxos no sistema distribuído. O Proposer é responsável por iniciar o processo de consenso, coordenar com Acceptors para chegar a um acordo sobre as operações dos clientes e garantir a ordem global das operações.
 
-1. **Parte 1**: Implementação do protocolo de sincronização distribuída (Paxos)
-2. **Parte 2**: Implementação da estratégia de replicação (ROWA) e tolerância a falhas
+## Características
 
-## Visão Geral da Arquitetura
+- Implementação completa do algoritmo Paxos
+- Suporte a Multi-Paxos com eleição de líder para melhor desempenho
+- Detecção e recuperação de falhas automática
+- Persistência de estado para sobreviver a reinicializações
+- Interface REST API para comunicação com outros componentes
+- Sistema de logging detalhado para depuração
 
-O sistema é composto pelos seguintes componentes:
+## Arquitetura
 
-- **Proposers (Cluster Sync)** - 5 instâncias: Recebem requisições dos clientes e iniciam o protocolo Paxos.
-- **Acceptors** - 5 instâncias: Votam em propostas e mantêm o estado persistente do protocolo.
-- **Learners** - 2 instâncias: Observam o processo de aceitação e determinam quando um consenso foi alcançado.
-- **Cluster Store** - 3 instâncias: Armazenam e gerenciam o recurso compartilhado R.
-- **Clientes** - 5 instâncias: Enviam requisições de acesso ao recurso.
+O Proposer é composto pelos seguintes módulos:
 
-Além disso, o sistema inclui ferramentas de monitoramento:
+- **main.py**: Ponto de entrada da aplicação
+- **api.py**: Endpoints da API REST
+- **proposer.py**: Implementação do algoritmo Paxos
+- **leader.py**: Lógica de eleição de líder para Multi-Paxos
+- **persistence.py**: Armazenamento persistente de estado
+- **common/**: Módulos compartilhados entre componentes
+  - **communication.py**: Utilitários de comunicação HTTP com retry e circuit breaker
+  - **logging.py**: Sistema de logging unificado
+  - **heartbeat.py**: Sistema de heartbeat para detecção de falhas
+  - **utils.py**: Funções de utilidade geral
 
-- **Prometheus**: Coleta métricas de todos os componentes.
-- **Grafana**: Fornece dashboards para visualização das métricas.
+## Requisitos
+
+- Python 3.8+
+- Docker
+- Bibliotecas Python listadas em `requirements.txt`
+
+## Configuração
+
+O componente é configurado através de variáveis de ambiente:
+
+- `NODE_ID`: ID único deste Proposer (1-5)
+- `PORT`: Porta HTTP para escutar (padrão: 8080)
+- `DEBUG`: Habilita logs detalhados (true/false)
+- `ACCEPTORS`: Lista de endereços dos Acceptors (formato: host:port,host:port,...)
+- `PROPOSERS`: Lista de endereços dos Proposers (formato: host:port,host:port,...)
+- `LEARNERS`: Lista de endereços dos Learners (formato: host:port,host:port,...)
+- `STORES`: Lista de endereços dos Cluster Stores (formato: host:port,host:port,...)
+- `USE_CLUSTER_STORE`: Habilita integração com Cluster Store na Parte 2 (true/false)
+
+## Instalação
+
+```bash
+# Clone o repositório
+git clone <repo-url>
+cd paxos-consensus-system/proposer
+
+# Instale dependências
+pip install -r requirements.txt
+
+# Execute o componente
+python main.py
+```
+
+## Executando com Docker
+
+```bash
+# Construa a imagem
+docker build -t paxos-proposer .
+
+# Execute o container
+docker run -p 8080:8080 \
+  -e NODE_ID=1 \
+  -e DEBUG=true \
+  -e ACCEPTORS=acceptor-1:8080,acceptor-2:8080,acceptor-3:8080,acceptor-4:8080,acceptor-5:8080 \
+  -e PROPOSERS=proposer-1:8080,proposer-2:8080,proposer-3:8080,proposer-4:8080,proposer-5:8080 \
+  -e LEARNERS=learner-1:8080,learner-2:8080 \
+  -e STORES=cluster-store-1:8080,cluster-store-2:8080,cluster-store-3:8080 \
+  -v $(pwd)/data:/data \
+  paxos-proposer
+```
+
+## API REST
+
+O Proposer expõe os seguintes endpoints:
+
+- `POST /propose`: Recebe requisições de clientes
+  - Corpo: Objeto JSON com os detalhes da requisição
+  - Resposta: Status 202 (Accepted) se aceita para processamento
+
+- `GET /status`: Retorna o estado atual do Proposer
+  - Resposta: Objeto JSON com informações sobre o estado
+
+- `GET /health`: Endpoint para verificação de saúde (heartbeat)
+  - Resposta: Status 200 com `{"status": "healthy"}` se funcionando corretamente
+
+- `GET /logs`: Retorna logs do componente (requer DEBUG=true)
+  - Resposta: Lista de entradas de log
+
+- `GET /logs/important`: Retorna apenas logs importantes
+  - Resposta: Lista de entradas de log importantes
+
+- `GET /leader-status`: Retorna informações do líder (apenas se for líder)
+  - Resposta: Objeto JSON com informações sobre o líder
+
+- `POST /leader-heartbeat`: Recebe heartbeat do líder
+  - Corpo: Objeto JSON com informações do líder
+  - Resposta: Status 200 se processado com sucesso
+
+## Testes
+
+Para executar os testes:
+
+```bash
+# Instale as dependências de teste
+pip install pytest pytest-asyncio httpx
+
+# Execute os testes unitários
+pytest tests/unit
+
+# Execute os testes de integração
+pytest tests/integration
+```
 
 ## Algoritmo Paxos
 
-O Paxos é executado em duas fases principais:
+Este componente implementa o algoritmo Paxos para consenso distribuído, com as seguintes fases:
 
 1. **Fase Prepare**:
-   - Proposer envia mensagem "prepare(n)" para os acceptors.
-   - Acceptors respondem com "promise" ou "not promise".
+   - Proposer seleciona número de proposta e envia para Acceptors
+   - Acceptors respondem com promise se o número for maior que qualquer anterior
 
 2. **Fase Accept**:
-   - Se o proposer receber promises da maioria, envia mensagem "accept(n, v)".
-   - Acceptors respondem com "accepted" ou "not accepted".
+   - Se recebeu maioria de promises, Proposer envia accept com valor
+   - Acceptors aceitam se não prometeram para número maior
 
-3. **Fase de Aprendizado**:
-   - Learners determinam quando um valor foi decidido pela maioria.
+3. **Otimização Multi-Paxos**:
+   - Líder eleito pode pular fase Prepare para instâncias subsequentes
+   - Eleição de líder é realizada usando o próprio Paxos (instância 0)
 
-## Protocolo de Replicação ROWA
+## Logs e Monitoramento
 
-Na Parte 2, implementamos a estratégia Read-One, Write-All (ROWA):
+O componente gera logs detalhados quando `DEBUG=true` e logs importantes sempre. Os logs são armazenados em:
 
-- **Leitura (Nr=1)**: Lê de qualquer réplica única.
-- **Escrita (Nw=3)**: Escreve em todas as réplicas disponíveis.
+- `/data/logs/proposer-X_all.log`: Todos os logs
+- `/data/logs/proposer-X_important.log`: Logs importantes
 
-## Requisitos do Sistema
+Onde X é o NODE_ID.
 
-- Docker
-- Docker Compose
+## Persistência
 
-## Como Executar
+O estado do Proposer é persistido em `/data/proposer_X_state.json`, permitindo recuperação após reinicialização. Checkpoints periódicos são criados em `/data/checkpoints/`.
 
-1. Clone o repositório:
-   ```bash
-   git clone <repositório>
-   cd paxos-sistema
-   ```
+## Tratamento de Falhas
 
-2. Torne o script de execução executável:
-   ```bash
-   chmod +x run.sh
-   ```
-
-3. Inicie o sistema:
-   ```bash
-   ./run.sh start
-   ```
-
-4. Verifique o status dos serviços:
-   ```bash
-   ./run.sh status
-   ```
-
-5. Acesse os dashboards de monitoramento:
-   - Prometheus: http://localhost:9090
-   - Grafana: http://localhost:3000 (usuário: admin, senha: admin)
-
-6. Para visualizar logs:
-   ```bash
-   ./run.sh logs [componente]
-   ```
-   Por exemplo: `./run.sh logs proposer-1`
-
-7. Para parar o sistema:
-   ```bash
-   ./run.sh stop
-   ```
-
-## Simulação de Falhas
-
-O sistema implementa três cenários específicos de falha:
-
-1. **Falha de nó do Cluster Store sem pedido pendente**:
-   ```bash
-   ./run.sh fail1 [store_id]
-   ```
-
-2. **Falha de nó do Cluster Store com pedido pendente**:
-   ```bash
-   ./run.sh fail2 [store_id]
-   ```
-
-3. **Falha de nó do Cluster Store após confirmação na fase prepare**:
-   ```bash
-   ./run.sh fail3 [store_id]
-   ```
-
-## Estrutura do Projeto
-
-```
-paxos-sistema/
-│
-├── proposer/          # Código para o Proposer (Cluster Sync)
-├── acceptor/          # Código para o Acceptor
-├── learner/           # Código para o Learner
-├── store/             # Código para o Cluster Store
-├── client/            # Código para o Cliente
-├── common/            # Código comum a todos os componentes
-├── prometheus/        # Configuração do Prometheus
-├── grafana/           # Configuração do Grafana
-├── run.sh             # Script para execução e teste
-└── docker-compose.yml # Configuração Docker Compose
-```
-
-## Monitoramento
-
-O sistema inclui uma infraestrutura completa de monitoramento:
-
-- **Métricas coletadas**: Número de propostas, durações de fases, consensos alcançados, operações de leitura/escrita, etc.
-- **Dashboards**: Visão geral do sistema, protocolo Paxos, replicação e falhas.
-- **Logs estruturados**: Todos os componentes geram logs em formato JSON para facilitar a análise.
-
-## Limitações e Considerações
-
-- Este projeto é uma implementação educacional e não deve ser usado em produção sem revisões adicionais.
-- A implementação utiliza FastAPI para a comunicação HTTP entre componentes.
-- O simulador de falhas é uma aproximação e pode não capturar todos os cenários reais de falha.
+O componente implementa detecção de falhas baseada em heartbeats. Se o líder atual falhar, uma nova eleição é iniciada automaticamente. Circuit breakers protegem contra falhas em cascata.

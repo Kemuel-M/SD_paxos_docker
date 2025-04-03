@@ -1,382 +1,211 @@
 """
-Utilidades comuns para todos os componentes.
+Funções de utilidade geral compartilhadas entre componentes.
 """
 import os
 import time
+import uuid
+import json
 import random
 import asyncio
-import aiohttp
-from typing import Dict, Any, Optional, List, Tuple, Union, Callable
-import json
-import logging
-import zlib
+from typing import Dict, Any, List, Optional, Tuple, Union
 
-
-def get_env_int(name: str, default: int) -> int:
+def generate_unique_id() -> str:
     """
-    Obtém um valor inteiro de uma variável de ambiente.
+    Gera um ID único.
     
-    Args:
-        name: Nome da variável de ambiente.
-        default: Valor padrão caso a variável não exista.
-        
     Returns:
-        Valor inteiro da variável de ambiente ou o valor padrão.
+        str: ID único baseado em UUID
     """
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
+    return str(uuid.uuid4())
 
-
-def get_env_float(name: str, default: float) -> float:
-    """
-    Obtém um valor float de uma variável de ambiente.
-    
-    Args:
-        name: Nome da variável de ambiente.
-        default: Valor padrão caso a variável não exista.
-        
-    Returns:
-        Valor float da variável de ambiente ou o valor padrão.
-    """
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    try:
-        return float(value)
-    except ValueError:
-        return default
-
-
-def get_env_str(name: str, default: str) -> str:
-    """
-    Obtém um valor string de uma variável de ambiente.
-    
-    Args:
-        name: Nome da variável de ambiente.
-        default: Valor padrão caso a variável não exista.
-        
-    Returns:
-        Valor string da variável de ambiente ou o valor padrão.
-    """
-    return os.environ.get(name, default)
-
-
-def get_current_timestamp() -> int:
+def current_timestamp() -> int:
     """
     Obtém o timestamp atual em milissegundos.
     
     Returns:
-        Timestamp atual em milissegundos.
+        int: Timestamp atual em milissegundos
     """
     return int(time.time() * 1000)
 
-
-def get_random_wait_time(min_seconds: float, max_seconds: float) -> float:
+def calculate_backoff(attempt: int, base: float = 0.5, jitter: float = 0.2) -> float:
     """
-    Gera um tempo de espera aleatório entre min_seconds e max_seconds.
+    Calcula tempo de espera com backoff exponencial e jitter.
     
     Args:
-        min_seconds: Tempo mínimo em segundos.
-        max_seconds: Tempo máximo em segundos.
-        
+        attempt: Número da tentativa (0-based)
+        base: Tempo base em segundos
+        jitter: Fator de jitter (0.0-1.0)
+    
     Returns:
-        Tempo de espera aleatório em segundos.
+        float: Tempo de espera em segundos
     """
-    return round(random.uniform(min_seconds, max_seconds), 3)
+    # Calcula backoff exponencial
+    backoff_time = base * (2 ** attempt)
+    
+    # Adiciona jitter (±jitter%)
+    jitter_amount = backoff_time * jitter * (2 * random.random() - 1)
+    
+    return max(0, backoff_time + jitter_amount)
 
-
-async def retry_with_backoff(
-    func: Callable, 
-    max_retries: int = 3, 
-    base_delay: float = 0.5, 
-    max_delay: float = 4.0,
-    backoff_factor: float = 2.0,
-    jitter: float = 0.2
-) -> Any:
+async def wait_with_backoff(attempt: int, base: float = 0.5, jitter: float = 0.2):
     """
-    Executa uma função com retentativas e backoff exponencial.
+    Espera um tempo com backoff exponencial e jitter.
     
     Args:
-        func: Função a ser executada.
-        max_retries: Número máximo de retentativas.
-        base_delay: Delay base em segundos.
-        max_delay: Delay máximo em segundos.
-        backoff_factor: Fator de backoff exponencial.
-        jitter: Fator de aleatoriedade para o delay.
-        
+        attempt: Número da tentativa (0-based)
+        base: Tempo base em segundos
+        jitter: Fator de jitter (0.0-1.0)
+    """
+    wait_time = calculate_backoff(attempt, base, jitter)
+    await asyncio.sleep(wait_time)
+
+def safe_json_loads(data: str, default: Any = None) -> Any:
+    """
+    Carrega JSON de forma segura.
+    
+    Args:
+        data: String JSON
+        default: Valor padrão se falhar
+    
     Returns:
-        Resultado da função.
-        
-    Raises:
-        Exception: Caso todas as retentativas falhem.
+        Any: Objeto Python convertido do JSON ou default
     """
-    retries = 0
-    last_exception = None
+    try:
+        return json.loads(data)
+    except Exception:
+        return default
+
+def safe_json_dumps(obj: Any, default: str = "{}") -> str:
+    """
+    Converte objeto para JSON de forma segura.
     
-    while retries <= max_retries:
-        try:
-            return await func()
-        except Exception as e:
-            last_exception = e
-            retries += 1
-            if retries > max_retries:
-                break
-                
-            # Calcular delay com backoff exponencial
-            delay = min(base_delay * (backoff_factor ** (retries - 1)), max_delay)
-            
-            # Adicionar jitter (±jitter%)
-            jitter_amount = delay * jitter
-            delay = delay + random.uniform(-jitter_amount, jitter_amount)
-            
-            # Esperar
-            await asyncio.sleep(delay)
+    Args:
+        obj: Objeto Python
+        default: String padrão se falhar
     
-    raise last_exception
-
-
-class CircuitBreaker:
+    Returns:
+        str: String JSON
     """
-    Implementação de um circuit breaker para proteger contra falhas em serviços externos.
+    try:
+        return json.dumps(obj)
+    except Exception:
+        return default
+
+def hash_consistent(key: str, num_buckets: int) -> int:
     """
-    # Estados possíveis
-    CLOSED = 'closed'  # Normal operation, requests flow through
-    OPEN = 'open'      # Circuit is open, requests fail fast
-    HALF_OPEN = 'half_open'  # Testing if service is back
+    Implementa hashing consistente para distribuição de carga.
     
-    def __init__(
-        self, 
-        failure_threshold: int = 5, 
-        recovery_timeout: float = 30.0, 
-        recovery_success_threshold: int = 3
-    ):
-        """
-        Inicializa o circuit breaker.
-        
-        Args:
-            failure_threshold: Número de falhas consecutivas para abrir o circuito.
-            recovery_timeout: Tempo em segundos para passar para o estado HALF_OPEN.
-            recovery_success_threshold: Número de sucessos consecutivos para fechar o circuito.
-        """
-        self.failure_threshold = failure_threshold
-        self.recovery_timeout = recovery_timeout
-        self.recovery_success_threshold = recovery_success_threshold
-        
-        self.state = self.CLOSED
-        self.failure_count = 0
-        self.success_count = 0
-        self.last_failure_time = 0
-        
-    async def execute(self, func: Callable) -> Any:
-        """
-        Executa uma função com proteção do circuit breaker.
-        
-        Args:
-            func: Função a ser executada.
-            
-        Returns:
-            Resultado da função.
-            
-        Raises:
-            Exception: Caso o circuito esteja aberto ou a função falhe.
-        """
-        # Verificar estado atual
-        if self.state == self.OPEN:
-            if time.time() - self.last_failure_time >= self.recovery_timeout:
-                # Passar para HALF_OPEN após o timeout
-                self.state = self.HALF_OPEN
-                self.success_count = 0
-            else:
-                # Falha rápida se o circuito estiver aberto
-                raise Exception("Circuit breaker is open")
-                
-        try:
-            result = await func()
-            
-            # Registrar sucesso
-            if self.state == self.HALF_OPEN:
-                self.success_count += 1
-                if self.success_count >= self.recovery_success_threshold:
-                    # Fechar o circuito após sucessos consecutivos
-                    self.state = self.CLOSED
-                    self.failure_count = 0
-            elif self.state == self.CLOSED:
-                # Resetar contagem de falhas após sucesso
-                self.failure_count = 0
-                
-            return result
-            
-        except Exception as e:
-            # Registrar falha
-            self.failure_count += 1
-            self.last_failure_time = time.time()
-            
-            if self.state == self.CLOSED and self.failure_count >= self.failure_threshold:
-                # Abrir o circuito após falhas consecutivas
-                self.state = self.OPEN
-                
-            if self.state == self.HALF_OPEN:
-                # Voltar para OPEN em caso de falha durante teste
-                self.state = self.OPEN
-                
-            raise e
-
-
-class HttpClient:
+    Args:
+        key: Chave a ser hasheada
+        num_buckets: Número de buckets
+    
+    Returns:
+        int: Índice do bucket (0 a num_buckets-1)
     """
-    Cliente HTTP com suporte a circuit breaker, retentativas e compressão.
+    # Usa hash interno do Python, que é diferente em cada execução
+    # Para consistência, precisamos usar um método fixo
+    hash_value = 0
+    for char in key:
+        hash_value = ((hash_value * 31) + ord(char)) & 0xFFFFFFFF
+    
+    return hash_value % num_buckets
+
+def parse_id_from_address(address: str) -> Optional[int]:
     """
-    def __init__(
-        self, 
-        base_url: str,
-        timeout: float = 0.5,  # 500ms default timeout
-        max_retries: int = 3,
-        circuit_breaker_threshold: int = 5,
-        circuit_breaker_timeout: float = 30.0
-    ):
-        """
-        Inicializa o cliente HTTP.
-        
-        Args:
-            base_url: URL base para requisições.
-            timeout: Timeout para requisições em segundos.
-            max_retries: Número máximo de retentativas.
-            circuit_breaker_threshold: Threshold para o circuit breaker.
-            circuit_breaker_timeout: Timeout para o circuit breaker.
-        """
-        self.base_url = base_url
-        self.timeout = timeout
-        self.max_retries = max_retries
-        self.circuit_breaker = CircuitBreaker(
-            failure_threshold=circuit_breaker_threshold,
-            recovery_timeout=circuit_breaker_timeout
-        )
-        self.session = None
-        
-    async def ensure_session(self):
-        """
-        Garante que a sessão HTTP esteja inicializada.
-        """
-        if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=self.timeout),
-                headers={"Connection": "keep-alive"}
-            )
-            
-    async def close(self):
-        """
-        Fecha a sessão HTTP.
-        """
-        if self.session and not self.session.closed:
-            await self.session.close()
-            self.session = None
-            
-    async def request(
-        self, 
-        method: str, 
-        endpoint: str, 
-        data: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, Any]] = None,
-        headers: Optional[Dict[str, Any]] = None
-    ) -> Tuple[int, Dict[str, Any]]:
-        """
-        Realiza uma requisição HTTP com circuit breaker e retentativas.
-        
-        Args:
-            method: Método HTTP (GET, POST, etc).
-            endpoint: Endpoint da requisição.
-            data: Dados para enviar no corpo da requisição.
-            params: Parâmetros para a URL.
-            headers: Cabeçalhos adicionais.
-            
-        Returns:
-            Tupla (status, json_response).
-            
-        Raises:
-            Exception: Em caso de falha após retentativas.
-        """
-        await self.ensure_session()
-        
-        url = f"{self.base_url}{endpoint}"
-        _headers = headers or {}
-        
-        # Aplicar compressão gzip para mensagens maiores que 1KB
-        if data:
-            json_data = json.dumps(data)
-            if len(json_data) > 1024:  # 1KB
-                _headers["Content-Encoding"] = "gzip"
-                compressed_data = zlib.compress(json_data.encode())
-                _headers["Content-Type"] = "application/json"
-                _data = compressed_data
-            else:
-                _headers["Content-Type"] = "application/json"
-                _data = json_data
+    Extrai ID de um endereço no formato 'component-X:port'.
+    
+    Args:
+        address: Endereço no formato 'component-X:port'
+    
+    Returns:
+        Optional[int]: ID extraído ou None se não for possível extrair
+    """
+    try:
+        # Exemplo: 'proposer-3:8080' -> 3
+        parts = address.split(':')[0].split('-')
+        if len(parts) >= 2:
+            return int(parts[-1])
+        return None
+    except Exception:
+        return None
+
+def get_round_robin_item(items: List[Any], current_index: int) -> Tuple[Any, int]:
+    """
+    Seleciona próximo item em esquema round-robin.
+    
+    Args:
+        items: Lista de itens
+        current_index: Índice atual
+    
+    Returns:
+        Tuple[Any, int]: Próximo item e novo índice
+    """
+    if not items:
+        raise ValueError("Lista vazia")
+    
+    next_index = (current_index + 1) % len(items)
+    return items[next_index], next_index
+
+def deep_merge(dict1: Dict[str, Any], dict2: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Mescla dois dicionários profundamente.
+    
+    Args:
+        dict1: Primeiro dicionário
+        dict2: Segundo dicionário (prevalece em caso de conflito)
+    
+    Returns:
+        Dict[str, Any]: Dicionário mesclado
+    """
+    result = dict1.copy()
+    
+    for key, value in dict2.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge(result[key], value)
         else:
-            _data = None
-                
-        async def _do_request():
-            # Implementação da requisição HTTP
-            async with getattr(self.session, method.lower())(
-                url, 
-                data=_data, 
-                params=params, 
-                headers=_headers
-            ) as response:
-                if response.status == 429:  # Too Many Requests
-                    retry_after = int(response.headers.get("Retry-After", "1"))
-                    await asyncio.sleep(retry_after)
-                    # Raise para que a retentativa seja tratada
-                    raise Exception(f"Rate limited. Retry after {retry_after}s")
-                    
-                try:
-                    json_response = await response.json()
-                except:
-                    json_response = {}
-                    
-                return response.status, json_response
-                
-        # Executar com circuit breaker e retentativas
-        return await self.circuit_breaker.execute(
-            lambda: retry_with_backoff(_do_request, max_retries=self.max_retries)
-        )
-        
-    async def get(
-        self, 
-        endpoint: str, 
-        params: Optional[Dict[str, Any]] = None,
-        headers: Optional[Dict[str, Any]] = None
-    ) -> Tuple[int, Dict[str, Any]]:
-        """
-        Realiza uma requisição GET.
-        """
-        return await self.request("GET", endpoint, params=params, headers=headers)
-        
-    async def post(
-        self, 
-        endpoint: str, 
-        data: Dict[str, Any],
-        params: Optional[Dict[str, Any]] = None,
-        headers: Optional[Dict[str, Any]] = None
-    ) -> Tuple[int, Dict[str, Any]]:
-        """
-        Realiza uma requisição POST.
-        """
-        return await self.request("POST", endpoint, data=data, params=params, headers=headers)
+            result[key] = value
+    
+    return result
 
-
-def compute_client_hash(client_id: str) -> int:
+def parse_range(range_str: str) -> Tuple[int, int]:
     """
-    Calcula o hash do ID do cliente para determinar o learner responsável.
+    Converte uma string de faixa (ex: "1-5") para tupla de inteiros.
     
     Args:
-        client_id: ID do cliente.
-        
+        range_str: String no formato "min-max"
+    
     Returns:
-        Hash CRC32 do ID do cliente.
+        Tuple[int, int]: Tupla (min, max)
     """
-    return zlib.crc32(client_id.encode()) & 0xffffffff
+    try:
+        parts = range_str.split('-')
+        if len(parts) == 2:
+            return int(parts[0]), int(parts[1])
+        return int(parts[0]), int(parts[0])
+    except Exception:
+        raise ValueError(f"Formato de faixa inválido: {range_str}")
+
+def random_delay(min_delay: float, max_delay: float) -> float:
+    """
+    Gera um tempo de espera aleatório dentro de uma faixa.
+    
+    Args:
+        min_delay: Tempo mínimo em segundos
+        max_delay: Tempo máximo em segundos
+    
+    Returns:
+        float: Tempo de espera em segundos
+    """
+    return min_delay + (random.random() * (max_delay - min_delay))
+
+async def wait_random_delay(min_delay: float, max_delay: float):
+    """
+    Espera um tempo aleatório dentro de uma faixa.
+    
+    Args:
+        min_delay: Tempo mínimo em segundos
+        max_delay: Tempo máximo em segundos
+    """
+    delay = random_delay(min_delay, max_delay)
+    await asyncio.sleep(delay)
+    return delay
