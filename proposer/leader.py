@@ -300,9 +300,63 @@ class LeaderElection:
         
         # Para o monitor de heartbeat (não precisamos monitorar a nós mesmos)
         self.leader_monitor.stop()
+
+        # Sincroniza estado com outros proposers para garantir continuidade
+        await self._sync_state_as_leader()
         
         # Inicia envio de heartbeats periódicos
         self.heartbeat_task = asyncio.create_task(self._send_heartbeats_loop())
+
+    async def _sync_state_as_leader(self):
+        """Sincroniza estado com outros proposers ao se tornar líder."""
+        logger.info("Sincronizando estado como novo líder")
+        
+        try:
+            # Prepara dados para sincronização
+            sync_data = {
+                "leaderId": self.node_id,
+                "term": self.current_term,
+                "lastInstanceId": self.proposer.last_instance_id,
+                "isNewLeader": True  # Indica que é um novo líder assumindo
+            }
+            
+            # Envia notificação a todos os outros proposers
+            tasks = []
+            for i, proposer_addr in enumerate(self.proposers):
+                proposer_id = i + 1  # IDs são 1-based
+                
+                # Não envia para si mesmo
+                if proposer_id == self.node_id:
+                    continue
+                
+                url = f"http://{proposer_addr}/leader-heartbeat"
+                # Usa timeout maior para sincronização inicial (1 segundo)
+                tasks.append(self.http_client.post(url, json=sync_data, timeout=1.0))
+            
+            # Aguarda resultados com tratamento de exceções
+            responses = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Analisa resultados para verificar se algum proposer tem instanceId maior
+            max_instance_id = self.proposer.last_instance_id
+            
+            for i, response in enumerate(responses):
+                if isinstance(response, Exception):
+                    # Ignora erros, apenas loga
+                    continue
+                    
+                if isinstance(response, dict) and "lastInstanceId" in response:
+                    last_id = response.get("lastInstanceId", 0)
+                    if last_id > max_instance_id:
+                        max_instance_id = last_id
+            
+            # Se descobriu instanceId maior, atualiza
+            if max_instance_id > self.proposer.last_instance_id:
+                logger.info(f"Atualizando lastInstanceId para {max_instance_id} com base na sincronização")
+                async with self.proposer.instance_id_lock:
+                    self.proposer.last_instance_id = max_instance_id
+        
+        except Exception as e:
+            logger.error(f"Erro durante sincronização como líder: {e}", exc_info=True)
     
     async def _stop_being_leader(self):
         """Ações a serem tomadas quando este nó deixa de ser líder."""

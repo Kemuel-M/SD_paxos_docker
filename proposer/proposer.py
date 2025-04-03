@@ -49,6 +49,9 @@ class Proposer:
         self.stores = stores
         self.proposal_counter = proposal_counter
         self.last_instance_id = last_instance_id
+
+        self.instance_id_lock = asyncio.Lock()
+        self.proposal_counter_lock = asyncio.Lock()
         
         # Estado das propostas (instanceId -> estado)
         self.proposals = {}
@@ -107,9 +110,10 @@ class Proposer:
         Args:
             client_request: Requisição do cliente
         """
-        # Gera um ID de instância único para esta proposta
-        instance_id = self.last_instance_id + 1
-        self.last_instance_id = instance_id
+        # Gera um ID de instância único para esta proposta utilizando lock
+        async with self.instance_id_lock:
+            instance_id = self.last_instance_id + 1
+            self.last_instance_id = instance_id
         
         # Adiciona metadados à proposta
         proposal = {
@@ -177,8 +181,21 @@ class Proposer:
                     proposal["status"] = "failed"
                     logger.warning(f"Proposta {instance_id} falhou no consenso Paxos")
                     
-                    # Notifica cliente sobre falha
-                    await self._notify_client_via_learner(instance_id, proposal, "NOT_COMMITTED")
+                    # Se ainda não excedeu o limite de tentativas, coloca de volta na fila com atraso
+                    if proposal["attempt"] < 3:
+                        proposal["attempt"] += 1
+                        logger.info(f"Programando nova tentativa para proposta {instance_id} (tentativa {proposal['attempt']}/3)")
+                        # Usa backoff exponencial com jitter entre tentativas
+                        delay = (2 ** proposal["attempt"]) * (0.8 + 0.4 * random.random())  # Base * (0.8-1.2 jitter)
+                        logger.info(f"Aguardando {delay:.2f}s antes da nova tentativa")
+                        await asyncio.sleep(delay)
+                        # Atualiza status e coloca de volta na fila
+                        proposal["status"] = "pending"
+                        await self.pending_queue.put(instance_id)
+                    else:
+                        # Notifica cliente sobre falha definitiva
+                        logger.error(f"Proposta {instance_id} falhou após todas as tentativas")
+                        await self._notify_client_via_learner(instance_id, proposal, "NOT_COMMITTED")
                 
                 # Marca como processada
                 self.pending_queue.task_done()
@@ -207,11 +224,11 @@ class Proposer:
         # Tenta até 3 vezes com números de proposta diferentes
         for attempt in range(3):
             try:
-                # Incrementa o contador de propostas
-                self.proposal_counter += 1
-                
-                # Gera número de proposta único (contador << 8 | ID)
-                proposal_number = (self.proposal_counter << 8) | self.node_id
+                async with self.proposal_counter_lock:
+                    # Incrementa o contador de propostas
+                    self.proposal_counter += 1
+                    # Gera número de proposta único (contador << 8 | ID)
+                    proposal_number = (self.proposal_counter << 8) | self.node_id
                 
                 logger.info(f"Tentativa {attempt+1} para instância {instance_id} com proposal_number {proposal_number}")
                 
