@@ -1,1 +1,8 @@
 zzz/
+test-reports/
+tests/__pycache__/
+tests/unit/__pycache__/
+store/store/__pycache__/
+proposer/proposer/__pycache__/
+learner/learner/__pycache__/
+acceptor/acceptor/__pycache__/
