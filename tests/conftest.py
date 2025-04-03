@@ -77,7 +77,7 @@ def mock_config():
 async def mock_proposer_state(mock_config):
     """Cria um estado simulado de Proposer para testes unitários."""
     # Este é um mock parcial - poderia ser expandido conforme necessário para testes específicos
-    with patch("proposer.main.load_config", return_value=mock_config):
+    with patch("proposer.proposer.main.load_config", return_value=mock_config):
         from proposer.proposer.main import ProposerState
         state = ProposerState(mock_config["node"]["id"])
         # Substituir métodos que acessam o disco
@@ -88,7 +88,7 @@ async def mock_proposer_state(mock_config):
 @pytest.fixture
 async def mock_acceptor_state(mock_config):
     """Cria um estado simulado de Acceptor para testes unitários."""
-    with patch("acceptor.main.load_config", return_value=mock_config):
+    with patch("acceptor.acceptor.main.load_config", return_value=mock_config):
         from acceptor.acceptor.main import AcceptorState
         state = AcceptorState(mock_config["node"]["id"])
         # Substituir métodos que acessam o disco
@@ -99,7 +99,7 @@ async def mock_acceptor_state(mock_config):
 @pytest.fixture
 async def mock_learner_state(mock_config):
     """Cria um estado simulado de Learner para testes unitários."""
-    with patch("learner.main.load_config", return_value=mock_config):
+    with patch("learner.learner.main.load_config", return_value=mock_config):
         from learner.learner.main import LearnerState
         state = LearnerState(mock_config["node"]["id"])
         # Substituir métodos que acessam o disco
@@ -112,7 +112,7 @@ async def mock_learner_state(mock_config):
 @pytest.fixture
 async def mock_store_state(mock_config):
     """Cria um estado simulado de Store para testes unitários."""
-    with patch("store.main.load_config", return_value=mock_config):
+    with patch("store.store.main.load_config", return_value=mock_config):
         from store.store.main import StoreState
         # Garantir que o diretório de recursos existe para testes
         os.makedirs(mock_config["storage"]["resourcePath"], exist_ok=True)

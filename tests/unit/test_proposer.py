@@ -9,8 +9,8 @@ import time
 
 # Importações diretas para testes unitários
 # Usamos patch para substituir funções que dependem de IO ou serviços externos
-with patch("proposer.main.load_config"), \
-     patch("proposer.main.TinyDB"):
+with patch("proposer.proposer.main.load_config"), \
+     patch("proposer.proposer.main.TinyDB"):
     from proposer.proposer.main import ProposerState, generate_latest, app
 
 @pytest.mark.asyncio

@@ -10,8 +10,8 @@ import time
 
 # Importações diretas para testes unitários
 # Usamos patch para substituir funções que dependem de IO ou serviços externos
-with patch("store.main.load_config"), \
-     patch("store.main.TinyDB"):
+with patch("store.store.main.load_config"), \
+     patch("store.store.main.TinyDB"):
     from store.store.main import StoreState, ResourceManager, TransactionManager, app, generate_latest
 
 @pytest.mark.asyncio
@@ -352,7 +352,7 @@ async def test_sync_handle_sync_request(mock_store_state):
     resource_data.timestamp = 200
     
     # Act
-    with patch("store.main.SyncManager.handle_sync_request", 
+    with patch("store.store.main.SyncManager.handle_sync_request", 
                new_callable=lambda: app.state.sync_manager.handle_sync_request):
         result = await app.state.sync_manager.handle_sync_request(resource_data)
     
@@ -384,7 +384,7 @@ async def test_sync_handle_sync_request_reject_older_version(mock_store_state):
     resource_data.timestamp = 200
     
     # Act
-    with patch("store.main.SyncManager.handle_sync_request", 
+    with patch("store.store.main.SyncManager.handle_sync_request", 
                new_callable=lambda: app.state.sync_manager.handle_sync_request):
         result = await app.state.sync_manager.handle_sync_request(resource_data)
     

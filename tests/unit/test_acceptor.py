@@ -9,7 +9,7 @@ import time
 
 # Importações diretas para testes unitários
 # Usamos patch para substituir funções que dependem de IO ou serviços externos
-with patch("acceptor.main.load_config"), \
+with patch("acceptor.acceptor.main.load_config"), \
      patch("acceptor.main.TinyDB"):
     from acceptor.acceptor.main import AcceptorState, app, generate_latest
 

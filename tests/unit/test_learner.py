@@ -10,8 +10,8 @@ import hashlib
 
 # Importações diretas para testes unitários
 # Usamos patch para substituir funções que dependem de IO ou serviços externos
-with patch("learner.main.load_config"), \
-     patch("learner.main.TinyDB"):
+with patch("learner.learner.main.load_config"), \
+     patch("learner.learner.main.TinyDB"):
     from learner.learner.main import LearnerState, DecisionApplier, app, generate_latest
 
 @pytest.mark.asyncio
@@ -165,7 +165,7 @@ async def test_learn_request_new_decision(mock_learner_state):
     # Mock para o endpoint learn
     with patch.object(state, 'record_acceptance', return_value=True) as mock_record, \
          patch.object(state, 'is_decided', return_value=False) as mock_is_decided, \
-         patch("learner.main.decision_applier.process_decision") as mock_process:
+         patch("learner.learner.main.decision_applier.process_decision") as mock_process:
         # Configuração do app
         app.state.state = state
         app.state.manager = MagicMock()
