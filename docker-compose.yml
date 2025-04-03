@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # Proposers (Cluster Sync) - 5 instâncias
   proposer-1:

@@ -21,11 +21,21 @@ log_warning() {
   echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] ${YELLOW}$1${NC}"
 }
 
+# Verificação para determinar se devemos usar docker-compose ou docker compose
+if command -v docker-compose &> /dev/null; then
+  DOCKER_COMPOSE="docker-compose"
+elif command -v docker &> /dev/null && docker compose version &> /dev/null; then
+  DOCKER_COMPOSE="docker compose"
+else
+  log_error "Nem docker-compose nem docker compose estão disponíveis. Por favor, instale o Docker Compose."
+  exit 1
+fi
+
 # Função para iniciar o sistema
 start_system() {
   log "Construindo e iniciando o sistema..."
-  docker-compose build
-  docker-compose up -d
+  $DOCKER_COMPOSE build
+  $DOCKER_COMPOSE up -d
   
   log "Aguardando inicialização dos serviços..."
   sleep 15
@@ -90,7 +100,7 @@ check_services() {
 # Função para parar o sistema
 stop_system() {
   log "Parando o sistema..."
-  docker-compose down
+  $DOCKER_COMPOSE down
 }
 
 # Função para mostrar logs
@@ -98,10 +108,10 @@ show_logs() {
   component=$1
   if [ -z "$component" ]; then
     log "Mostrando logs de todos os componentes..."
-    docker-compose logs --tail=100 -f
+    $DOCKER_COMPOSE logs --tail=100 -f
   else
     log "Mostrando logs do componente $component..."
-    docker-compose logs --tail=100 -f $component
+    $DOCKER_COMPOSE logs --tail=100 -f $component
   fi
 }
 
@@ -114,7 +124,7 @@ simulate_failure_store_without_request() {
   fi
   
   log_warning "Simulando falha no Store $store_id sem pedido pendente..."
-  docker-compose stop store-$store_id
+  $DOCKER_COMPOSE stop store-$store_id
   
   log "Aguardando 7 segundos para detecção da falha (3 heartbeats + tempo de processamento)..."
   sleep 7
@@ -126,7 +136,7 @@ simulate_failure_store_without_request() {
   read
   
   log "Restaurando Store $store_id..."
-  docker-compose start store-$store_id
+  $DOCKER_COMPOSE start store-$store_id
   
   log "Aguardando recuperação do nó..."
   sleep 10
@@ -149,7 +159,7 @@ simulate_failure_store_with_request() {
   log "Primeiro, aguarde até ver uma operação iniciando nos logs do learner..."
   
   log "Monitorando logs do learner-1..."
-  docker-compose logs -f learner-1 &
+  $DOCKER_COMPOSE logs -f learner-1 &
   log_pid=$!
   
   log_warning "Quando observar uma operação iniciando, pressione Enter para parar o Store $store_id..."
@@ -159,7 +169,7 @@ simulate_failure_store_with_request() {
   kill $log_pid
   
   log "Parando Store $store_id..."
-  docker-compose stop store-$store_id
+  $DOCKER_COMPOSE stop store-$store_id
   
   log "Aguardando timeout da operação (500ms)..."
   sleep 2
@@ -171,7 +181,7 @@ simulate_failure_store_with_request() {
   read
   
   log "Restaurando Store $store_id..."
-  docker-compose start store-$store_id
+  $DOCKER_COMPOSE start store-$store_id
   
   log "Aguardando recuperação do nó..."
   sleep 10
@@ -192,7 +202,7 @@ simulate_failure_store_after_ready() {
   log "Como isso exigiria alteração do código, vamos simular de forma aproximada."
   
   log "Monitorando logs do store-$store_id para identificar operações prepare..."
-  docker-compose logs -f store-$store_id | grep -i "prepare" &
+  $DOCKER_COMPOSE logs -f store-$store_id | grep -i "prepare" &
   log_pid=$!
   
   log_warning "Quando observar uma requisição prepare sendo recebida, pressione Enter para parar o Store $store_id..."
@@ -202,7 +212,7 @@ simulate_failure_store_after_ready() {
   kill $log_pid
   
   log "Parando Store $store_id..."
-  docker-compose stop store-$store_id
+  $DOCKER_COMPOSE stop store-$store_id
   
   log "Aguardando timeout da operação..."
   sleep 2
@@ -214,7 +224,7 @@ simulate_failure_store_after_ready() {
   read
   
   log "Restaurando Store $store_id..."
-  docker-compose start store-$store_id
+  $DOCKER_COMPOSE start store-$store_id
   
   log "Aguardando recuperação do nó..."
   sleep 10
@@ -241,6 +251,8 @@ show_help() {
   echo "Acesso às interfaces web:"
   echo "  - Prometheus: http://localhost:9090"
   echo "  - Grafana: http://localhost:3000 (admin/admin)"
+  echo
+  echo "Nota: Este script está usando: $DOCKER_COMPOSE"
   echo
 }
 
