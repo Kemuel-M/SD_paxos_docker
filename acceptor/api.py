@@ -85,7 +85,7 @@ def create_api(acceptor, persistence):
             
         logger.info(f"Received prepare request for instance {request.instanceId} from proposer {request.proposerId}")
         
-        # Process the prepare request
+        # Process the prepare request asynchronously
         result = await acceptor.process_prepare(request.dict())
         
         return result
@@ -98,17 +98,17 @@ def create_api(acceptor, persistence):
             
         logger.info(f"Received accept request for instance {request.instanceId} from proposer {request.proposerId}")
         
-        # Process the accept request
+        # Process the accept request asynchronously
         result = await acceptor.process_accept(request.dict())
         
         return result
     
     # Endpoint for acceptor status
-
     @app.get("/status", response_model=StatusResponse)
     async def get_status():
+        # Get status synchronously
         status = acceptor.get_status()
-        # Calcula o uptime de forma síncrona
+        # Calculate uptime synchronously
         status["uptime"] = time.time() - start_time
         return status
     
@@ -125,6 +125,7 @@ def create_api(acceptor, persistence):
     # Endpoint for getting instance information
     @app.get("/instance/{instance_id}")
     async def get_instance(instance_id: int):
+        # Get instance info synchronously
         info = acceptor.get_instance_info(instance_id)
         
         if not info:
@@ -199,18 +200,26 @@ def create_api(acceptor, persistence):
     @app.get("/stats")
     async def get_stats():
         """Return acceptor statistics."""
+        # Use synchronous get_status
+        status = acceptor.get_status()
+        
         stats = {
             "uptime": time.time() - start_time,
-            "node_id": acceptor.node_id,
-            "prepare_requests_processed": acceptor.prepare_requests_processed,
-            "accept_requests_processed": acceptor.accept_requests_processed,
-            "promises_made": acceptor.promises_made,
-            "proposals_accepted": acceptor.proposals_accepted,
-            "active_instances": len(acceptor.promises),
-            "accepted_instances": len(acceptor.accepted),
-            "instance_id_range": f"{min(acceptor.promises.keys()) if acceptor.promises else 'N/A'}-"
-                                f"{max(acceptor.promises.keys()) if acceptor.promises else 'N/A'}"
+            "node_id": status["node_id"],
+            "prepare_requests_processed": status["prepare_requests_processed"],
+            "accept_requests_processed": status["accept_requests_processed"],
+            "promises_made": status["promises_made"],
+            "proposals_accepted": status["proposals_accepted"],
+            "active_instances": status["active_instances"],
+            "accepted_instances": status["accepted_instances"]
         }
+        
+        # Add instance ID range if there are active instances
+        if acceptor.promises:
+            stats["instance_id_range"] = f"{min(acceptor.promises.keys()) if acceptor.promises else 'N/A'}-" \
+                                        f"{max(acceptor.promises.keys()) if acceptor.promises else 'N/A'}"
+        else:
+            stats["instance_id_range"] = "N/A"
         
         return {"stats": stats}
     

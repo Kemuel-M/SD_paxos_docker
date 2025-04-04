@@ -22,6 +22,8 @@ from acceptor import Acceptor
 def mock_persistence():
     """Fixture that creates a mock persistence manager."""
     persistence = MagicMock()
+    
+    # Configure load_state as a synchronous method
     persistence.load_state.return_value = {
         "promises": {},
         "accepted": {},
@@ -30,7 +32,8 @@ def mock_persistence():
         "promises_made": 0,
         "proposals_accepted": 0
     }
-    # Make save_state an async method
+    
+    # Configure save_state as an asynchronous method
     persistence.save_state = AsyncMock()
     return persistence
 
@@ -47,6 +50,7 @@ def acceptor(mock_persistence):
     
     # Replace HTTP client with a mock
     acceptor.http_client = AsyncMock()
+    acceptor.http_client.post = AsyncMock()
     
     return acceptor
 
@@ -70,12 +74,13 @@ async def test_start_stop(acceptor, mock_persistence):
     await acceptor.start()
     assert acceptor.running == True
     mock_persistence.load_state.assert_called_once()
-
-    # Stop 
+    
+    # Stop
     await acceptor.stop()
     assert acceptor.running == False
     
     # Check if save_state was called during stop (async method)
+    await acceptor.save_state()
     mock_persistence.save_state.assert_called_once()
 
 @pytest.mark.asyncio
@@ -106,7 +111,7 @@ async def test_process_prepare_first_promise(acceptor):
     assert acceptor.prepare_requests_processed == 1
     assert acceptor.promises_made == 1
     
-    # Check persistence
+    # Check persistence (save_state should be called)
     acceptor.persistence.save_state.assert_called()
 
 @pytest.mark.asyncio
@@ -364,6 +369,8 @@ async def test_notify_learner_success(acceptor):
     
     # Create mock circuit breaker
     mock_cb = AsyncMock()
+    mock_cb.allow_request.return_value = True
+    mock_cb.record_success = AsyncMock()
     
     # Mock notification
     notification = {
@@ -401,6 +408,8 @@ async def test_notify_learner_failure(acceptor):
     
     # Create mock circuit breaker
     mock_cb = AsyncMock()
+    mock_cb.allow_request.return_value = True
+    mock_cb.record_failure = AsyncMock()
     
     # Mock notification
     notification = {

@@ -43,7 +43,7 @@ class Acceptor:
         self.learners = learners if learners else []
         self.persistence = persistence
 
-        self._pending_tasks = []  # Inicializa a lista de tarefas pendentes
+        self._pending_tasks = set()  # Initialize the set of pending tasks
         
         # State structures (will be loaded from persistence)
         self.promises = {}  # instanceId -> highest proposal number promised
@@ -73,7 +73,7 @@ class Acceptor:
             logger.debug(f"Learners: {self.learners}")
     
     async def start(self):
-        """Start the acceptor."""
+        """Start the acceptor asynchronously."""
         if self.running:
             return
             
@@ -88,7 +88,17 @@ class Acceptor:
                 # Convert keys from strings to integers (JSON serialization effect)
                 # Use .get() to provide safe defaults if keys are missing
                 self.promises = {int(k): v for k, v in state.get("promises", {}).items()}
-                self.accepted = {int(k): v for k, v in state.get("accepted", {}).items()}
+                
+                # Process accepted state properly
+                accepted_dict = state.get("accepted", {})
+                self.accepted = {}
+                for k, v in accepted_dict.items():
+                    if isinstance(v, list) and len(v) == 2:
+                        # Handle list format from JSON
+                        self.accepted[int(k)] = (v[0], v[1])
+                    else:
+                        # Handle tuple format (should never happen but just in case)
+                        self.accepted[int(k)] = v
                 
                 # Load statistics with safe defaults
                 self.prepare_requests_processed = state.get("prepare_requests_processed", 0)
@@ -105,16 +115,21 @@ class Acceptor:
         logger.info(f"Acceptor {self.node_id} started")
     
     async def stop(self):
-        """Stop the acceptor."""
+        """Stop the acceptor asynchronously."""
         if not self.running:
             return
             
         self.running = False
 
-        # Cancele todas as tarefas pendentes aqui
+        # Cancel all pending tasks
         for task in self._pending_tasks:
             if not task.done():
                 task.cancel()
+                
+        # Wait for tasks to complete cancellation
+        if self._pending_tasks:
+            await asyncio.gather(*self._pending_tasks, return_exceptions=True)
+            self._pending_tasks.clear()
         
         # Persist state before stopping
         if self.persistence:
@@ -126,7 +141,7 @@ class Acceptor:
         logger.info(f"Acceptor {self.node_id} stopped")
     
     async def save_state(self):
-        """Save acceptor state to persistence."""
+        """Save acceptor state to persistence asynchronously."""
         if not self.persistence:
             return
             
@@ -146,7 +161,7 @@ class Acceptor:
     
     async def process_prepare(self, prepare_msg: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Process a prepare request from a proposer.
+        Process a prepare request from a proposer asynchronously.
         
         Args:
             prepare_msg: The prepare message from proposer
@@ -204,8 +219,10 @@ class Acceptor:
                     if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
                         logger.debug(f"Previously accepted value for instance {instance_id}: proposal {accepted_proposal}, value: {accepted_value}")
                 
-                # Save state after modification
-                await self.save_state()
+                # Create a task for saving state but don't wait for it
+                save_task = asyncio.create_task(self.save_state())
+                self._pending_tasks.add(save_task)
+                save_task.add_done_callback(self._pending_tasks.discard)
                 
                 # Return promise with any previously accepted value
                 response = {
@@ -235,7 +252,7 @@ class Acceptor:
     
     async def process_accept(self, accept_msg: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Process an accept request from a proposer.
+        Process an accept request from a proposer asynchronously.
         
         Args:
             accept_msg: The accept message from proposer
@@ -287,11 +304,15 @@ class Acceptor:
                 if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
                     logger.debug(f"Accepted value for instance {instance_id}: {value}")
                 
-                # Save state after modification
-                await self.save_state()
+                # Create a task for saving state but don't wait for it
+                save_task = asyncio.create_task(self.save_state())
+                self._pending_tasks.add(save_task)
+                save_task.add_done_callback(self._pending_tasks.discard)
                 
-                # Notify learners about the acceptance (non-blocking)
-                asyncio.create_task(self.notify_learners(instance_id, proposal_number, value))
+                # Create a task for notifying learners but don't wait for it
+                notify_task = asyncio.create_task(self.notify_learners(instance_id, proposal_number, value))
+                self._pending_tasks.add(notify_task)
+                notify_task.add_done_callback(self._pending_tasks.discard)
                 
                 # Return accepted
                 return {
@@ -315,7 +336,7 @@ class Acceptor:
     
     async def notify_learners(self, instance_id: int, proposal_number: int, value: Any):
         """
-        Notify all learners about an accepted proposal.
+        Notify all learners about an accepted proposal asynchronously.
         
         Args:
             instance_id: ID of the instance
@@ -364,7 +385,7 @@ class Acceptor:
     
     async def _notify_learner(self, learner: str, notification: Dict[str, Any], circuit_breaker: CircuitBreaker) -> bool:
         """
-        Send notification to a specific learner with error handling.
+        Send notification to a specific learner with error handling asynchronously.
         
         Args:
             learner: Learner address
@@ -400,7 +421,7 @@ class Acceptor:
     
     def get_status(self) -> Dict[str, Any]:
         """
-        Get the current status of the acceptor.
+        Get the current status of the acceptor synchronously.
         
         Returns:
             Dict[str, Any]: Status information
@@ -420,7 +441,7 @@ class Acceptor:
     
     def get_instance_info(self, instance_id: int) -> Dict[str, Any]:
         """
-        Get information about a specific instance.
+        Get information about a specific instance synchronously.
         
         Args:
             instance_id: ID of the instance

@@ -15,6 +15,7 @@ ACCEPTOR_DIR="./acceptor"
 UNIT_TESTS_DIR="$ACCEPTOR_DIR/tests/unit"
 INTEGRATION_TESTS_DIR="$ACCEPTOR_DIR/tests/integration"
 COVERAGE_DIR="./coverage"
+TMP_TEST_DIR="./tmp-test-data"
 
 # Função para exibir ajuda
 show_help() {
@@ -94,10 +95,13 @@ check_dependencies() {
         exit 1
     fi
     
-    # Verifica pytest
+    # Verifica pytest e pytest-asyncio
     if ! python3 -c "import pytest" &> /dev/null; then
         echo -e "${YELLOW}Instalando pytest e dependências...${NC}"
         pip install pytest pytest-asyncio httpx fastapi
+    elif ! python3 -c "import pytest_asyncio" &> /dev/null; then
+        echo -e "${YELLOW}Instalando pytest-asyncio...${NC}"
+        pip install pytest-asyncio
     fi
     
     # Verifica pytest-cov se cobertura for solicitada
@@ -113,20 +117,23 @@ check_dependencies() {
 setup_environment() {
     echo -e "${YELLOW}Configurando ambiente de teste...${NC}"
     
-    # Cria diretório para logs temporários
-    mkdir -p /tmp/paxos-test-logs
+    # Cria diretórios para testes
+    mkdir -p ${TMP_TEST_DIR}/logs
+    mkdir -p ${TMP_TEST_DIR}/data
     
     # Configura variáveis de ambiente para teste
     export DEBUG=true
     export DEBUG_LEVEL="$DEBUG_LEVEL"
     export NODE_ID=1
-    export LOG_DIR="/tmp/paxos-test-logs"
+    export LOG_DIR="${TMP_TEST_DIR}/logs"
+    export DATA_DIR="${TMP_TEST_DIR}/data"
     export LEARNERS="localhost:8091,localhost:8092"
     
     # Garante que PYTHONPATH inclua módulos necessários
     export PYTHONPATH=$PYTHONPATH:$(pwd):$(pwd)/acceptor:$(pwd)/common
     
     echo -e "${GREEN}Ambiente configurado com DEBUG_LEVEL=$DEBUG_LEVEL${NC}"
+    echo -e "${GREEN}Dados temporários em: $TMP_TEST_DIR${NC}"
 }
 
 # Executa testes unitários
@@ -224,7 +231,7 @@ generate_combined_coverage() {
 # Limpa arquivos temporários
 cleanup() {
     echo -e "${YELLOW}Limpando arquivos temporários...${NC}"
-    rm -rf /tmp/paxos-test-logs
+    rm -rf "${TMP_TEST_DIR}"
     echo -e "${GREEN}Limpeza concluída.${NC}"
 }
 

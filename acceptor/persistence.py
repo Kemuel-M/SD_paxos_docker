@@ -56,7 +56,7 @@ class AcceptorPersistence:
     
     def load_state(self) -> Dict[str, Any]:
         """
-        Load the acceptor state from file.
+        Load the acceptor state from file synchronously.
         
         Returns:
             Dict[str, Any]: Loaded state or default state if file doesn't exist
@@ -80,7 +80,7 @@ class AcceptorPersistence:
     
     async def save_state(self, state: Optional[Dict[str, Any]] = None) -> bool:
         """
-        Save the acceptor state to file.
+        Save the acceptor state to file asynchronously.
         
         Args:
             state: State to be saved, or None to use default state
@@ -122,7 +122,7 @@ class AcceptorPersistence:
     
     async def _create_checkpoint(self, state: Dict[str, Any]) -> bool:
         """
-        Create a checkpoint file of the current state.
+        Create a checkpoint file of the current state asynchronously.
         
         Args:
             state: State to be checkpointed
@@ -151,7 +151,7 @@ class AcceptorPersistence:
     
     async def _cleanup_old_checkpoints(self, keep: int = 5):
         """
-        Remove old checkpoints, keeping only the most recent ones.
+        Remove old checkpoints, keeping only the most recent ones asynchronously.
         
         Args:
             keep: Number of checkpoints to keep
@@ -174,7 +174,7 @@ class AcceptorPersistence:
     
     def _restore_from_checkpoint(self) -> Dict[str, Any]:
         """
-        Try to restore state from the most recent checkpoint.
+        Try to restore state from the most recent checkpoint synchronously.
         
         Returns:
             Dict[str, Any]: Restored state from checkpoint or default state
@@ -204,7 +204,7 @@ class AcceptorPersistence:
     
     def _get_default_state(self) -> Dict[str, Any]:
         """
-        Return the default state for initialization.
+        Return the default state for initialization synchronously.
         
         Returns:
             Dict[str, Any]: Default state

@@ -81,7 +81,7 @@ def setup_integration():
         # Cleanup
         loop = asyncio.get_event_loop()
         loop.run_until_complete(acceptor.stop())
-        loop.run_until_complete(asyncio.sleep(0.1))  # Dê tempo para tarefas finalizarem
+        loop.run_until_complete(asyncio.sleep(0.1))  # Give time for tasks to complete
         tasks = asyncio.all_tasks(loop)
         for task in tasks:
             if not task.done() and task != asyncio.current_task():
@@ -279,7 +279,7 @@ def test_persistence(setup_integration):
     acceptor.promises_made = 8
     acceptor.proposals_accepted = 3
 
-    # Save state
+    # Save state (use event loop to run the async method)
     loop = asyncio.get_event_loop()
     loop.run_until_complete(persistence.save_state({
         "promises": acceptor.promises,
@@ -297,7 +297,7 @@ def test_persistence(setup_integration):
     # Create a new persistence instance and load state
     new_persistence = setup_integration["persistence"].__class__(node_id=1, data_dir=temp_dir)
     
-    # Carregamento síncrono
+    # Use synchronous load_state method
     loaded_state = new_persistence.load_state()
 
     # Check loaded state (keys are converted to strings in JSON)
@@ -328,7 +328,7 @@ def test_recovery_after_crash(setup_integration):
     acceptor.promises = {instance_id: original_proposal_num}
     acceptor.accepted = {instance_id: (original_proposal_num, original_value)}
     
-    # Save state to persistence
+    # Save state to persistence (use event loop for async method)
     loop = asyncio.get_event_loop()
     loop.run_until_complete(persistence.save_state({
         "promises": acceptor.promises,

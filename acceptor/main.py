@@ -15,6 +15,7 @@ from fastapi import FastAPI
 
 # Add current directory to PYTHONPATH
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # For common modules
 
 from api import create_api
 from acceptor import Acceptor
@@ -28,6 +29,7 @@ DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
 DEBUG_LEVEL = os.getenv("DEBUG_LEVEL", "basic").lower()  # Levels: basic, advanced, trace
 LEARNERS = os.getenv("LEARNERS", "learner-1:8080,learner-2:8080").split(",")
 LOG_DIR = os.getenv("LOG_DIR", "/data/logs")
+DATA_DIR = os.getenv("DATA_DIR", "/data")
 
 logger = logging.getLogger("acceptor")
 
@@ -54,8 +56,12 @@ def main():
         logger.info(f"DEBUG mode enabled with level: {DEBUG_LEVEL}")
         logger.info(f"Configuration: PORT={PORT}, LEARNERS={len(LEARNERS)}")
     
-    # Load persistent state
-    persistence = AcceptorPersistence(NODE_ID)
+    # Create data directories if they don't exist
+    os.makedirs(LOG_DIR, exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    
+    # Create persistence manager
+    persistence = AcceptorPersistence(NODE_ID, DATA_DIR)
     
     # Create acceptor instance
     acceptor = Acceptor(
@@ -105,6 +111,9 @@ def main():
                 # Save state
                 await persistence.save_state(current_state)
                 
+            except asyncio.CancelledError:
+                logger.info("Persistence loop cancelled")
+                break
             except Exception as e:
                 logger.error(f"Error saving persistent state: {e}", exc_info=True)
     

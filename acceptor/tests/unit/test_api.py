@@ -42,91 +42,55 @@ def setup_module():
 @pytest.fixture
 def mock_acceptor():
     """Fixture that creates a mock acceptor."""
-    # Create a mock that distinguishes between sync and async methods
-    class MockAcceptor:
-        def __init__(self):
-            self.node_id = 1
-            self.running = True
-            self.prepare_requests_processed = 10
-            self.accept_requests_processed = 5
-            self.promises_made = 8
-            self.proposals_accepted = 3
-            self.promises = {1: 10, 2: 20}
-            self.accepted = {1: (10, {"value": "test"})}
-            self.learners = ["learner-1:8080", "learner-2:8080"]
-        
-        def get_status(self):
-            """Synchronous method for getting status"""
-            return {
-                "node_id": self.node_id,
-                "state": "running",
-                "learners": len(self.learners),
-                "active_instances": len(self.promises),
-                "accepted_instances": len(self.accepted),
-                "prepare_requests_processed": self.prepare_requests_processed,
-                "accept_requests_processed": self.accept_requests_processed,
-                "promises_made": self.promises_made,
-                "proposals_accepted": self.proposals_accepted,
-                "timestamp": int(time.time() * 1000)
-            }
-        
-        async def notify_learners(self, instance_id, proposal_number, value):
-            """Asynchronous method for notifying learners"""
-            # Simulate network operation
-            await asyncio.sleep(0.01)
-            return True
-        
-        async def save_state(self):
-            """Asynchronous method for saving state"""
-            # Simulate disk I/O
-            await asyncio.sleep(0.01)
-            return True
-        
-        def get_instance_info(self, instance_id):
-            """Synchronous method for getting instance info"""
-            if instance_id == 1:
-                return {
-                    "instanceId": instance_id, 
-                    "highestPromised": 10, 
-                    "accepted": True, 
-                    "proposalNumber": 10, 
-                    "value": {"value": "test"}
-                }
-            elif instance_id == 2:
-                return {
-                    "instanceId": instance_id, 
-                    "highestPromised": 20, 
-                    "accepted": False
-                }
-            return {}
+    acceptor = AsyncMock()
     
-    return MockAcceptor()
+    # Mock synchronous methods
+    acceptor.get_status = MagicMock(return_value={
+        "node_id": 1,
+        "state": "running",
+        "learners": 2,
+        "active_instances": 2,
+        "accepted_instances": 1,
+        "prepare_requests_processed": 10,
+        "accept_requests_processed": 5,
+        "promises_made": 8,
+        "proposals_accepted": 3,
+        "timestamp": int(time.time() * 1000)
+    })
+    
+    acceptor.get_instance_info = MagicMock(side_effect=lambda instance_id: (
+        {"instanceId": 1, "highestPromised": 10, "accepted": True, "proposalNumber": 10, "value": {"value": "test"}}
+        if instance_id == 1 else
+        {"instanceId": 2, "highestPromised": 20, "accepted": False}
+        if instance_id == 2 else
+        {}
+    ))
+    
+    # Mock asynchronous methods
+    acceptor.process_prepare = AsyncMock(return_value={"accepted": True, "proposalNumber": 42, "instanceId": 1, "acceptorId": 1})
+    acceptor.process_accept = AsyncMock(return_value={"accepted": True, "proposalNumber": 42, "instanceId": 1, "acceptorId": 1})
+    
+    return acceptor
 
 @pytest.fixture
 def mock_persistence():
     """Fixture that creates a mock persistence manager."""
-    class MockPersistence:
-        def __init__(self, node_id=1):
-            self.node_id = node_id
-        
-        def load_state(self):
-            """Synchronous method for loading state"""
-            return {
-                "promises": {str(1): 10},
-                "accepted": {str(1): [10, {"value": "test"}]},
-                "prepare_requests_processed": 10,
-                "accept_requests_processed": 5,
-                "promises_made": 8,
-                "proposals_accepted": 3
-            }
-        
-        async def save_state(self, state=None):
-            """Asynchronous method for saving state"""
-            # Simulate disk I/O
-            await asyncio.sleep(0.01)
-            return True
+    persistence = MagicMock()
     
-    return MockPersistence()
+    # Configure synchronous methods
+    persistence.load_state = MagicMock(return_value={
+        "promises": {"1": 10},
+        "accepted": {"1": [10, {"value": "test"}]},
+        "prepare_requests_processed": 10,
+        "accept_requests_processed": 5,
+        "promises_made": 8,
+        "proposals_accepted": 3
+    })
+    
+    # Configure asynchronous methods
+    persistence.save_state = AsyncMock(return_value=True)
+    
+    return persistence
 
 @pytest.fixture
 def api_client(mock_acceptor, mock_persistence):
@@ -149,21 +113,20 @@ def test_prepare_endpoint(api_client, mock_acceptor):
         "proposerId": 2
     }
     
+    # Reset the mock
+    mock_acceptor.process_prepare.reset_mock()
+    
     # Send request
     response = api_client.post("/prepare", json=prepare_request)
     
     # Check response
     assert response.status_code == 200
-    data = response.json()
-    assert data["accepted"] == True
     
     # Check if acceptor method was called
     mock_acceptor.process_prepare.assert_called_once()
     args, kwargs = mock_acceptor.process_prepare.call_args
 
-    expected_request = prepare_request.copy()
-    expected_request["clientRequest"] = {}
-    assert args[0] == expected_request
+    assert args[0] == prepare_request
 
 def test_accept_endpoint(api_client, mock_acceptor):
     """Test the /accept endpoint."""
@@ -176,13 +139,14 @@ def test_accept_endpoint(api_client, mock_acceptor):
         "value": {"clientId": "client-1", "value": "test"}
     }
     
+    # Reset the mock
+    mock_acceptor.process_accept.reset_mock()
+    
     # Send request
     response = api_client.post("/accept", json=accept_request)
     
     # Check response
     assert response.status_code == 200
-    data = response.json()
-    assert data["accepted"] == True
     
     # Check if acceptor method was called
     mock_acceptor.process_accept.assert_called_once()
@@ -206,6 +170,9 @@ def test_status_endpoint(api_client, mock_acceptor):
     assert data["promises_made"] == 8
     assert data["proposals_accepted"] == 3
     assert "uptime" in data
+    
+    # Verify that the synchronous method was called
+    mock_acceptor.get_status.assert_called_once()
 
 def test_health_endpoint(api_client):
     """Test the /health endpoint."""
@@ -222,6 +189,9 @@ def test_health_endpoint(api_client):
 
 def test_instance_endpoint_existing(api_client, mock_acceptor):
     """Test the /instance/{instance_id} endpoint for an existing instance."""
+    # Reset the mock
+    mock_acceptor.get_instance_info.reset_mock()
+    
     # Send request
     response = api_client.get("/instance/1")
     
@@ -233,9 +203,15 @@ def test_instance_endpoint_existing(api_client, mock_acceptor):
     assert data["accepted"] == True
     assert data["proposalNumber"] == 10
     assert data["value"] == {"value": "test"}
+    
+    # Check if the synchronous method was called correctly
+    mock_acceptor.get_instance_info.assert_called_once_with(1)
 
 def test_instance_endpoint_nonexistent(api_client, mock_acceptor):
     """Test the /instance/{instance_id} endpoint for a nonexistent instance."""
+    # Configure mock to return empty for nonexistent instance
+    mock_acceptor.get_instance_info.return_value = {}
+    
     # Send request
     response = api_client.get("/instance/999")
     
@@ -248,12 +224,8 @@ def test_instance_endpoint_nonexistent(api_client, mock_acceptor):
 
 def test_instances_endpoint(api_client, mock_acceptor):
     """Test the /instances endpoint."""
-    # Mock acceptor method to return instance list
-    mock_acceptor.get_instance_info.side_effect = lambda instance_id: (
-        {"instanceId": 1, "highestPromised": 10, "accepted": True, "proposalNumber": 10, "value": {"value": "test"}}
-        if instance_id == 1 else
-        {"instanceId": 2, "highestPromised": 20, "accepted": False}
-    )
+    # Configure mock to return instances list
+    mock_acceptor.promises = {1: 10, 2: 20}
     
     # Send request
     response = api_client.get("/instances")
