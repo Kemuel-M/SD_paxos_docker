@@ -270,7 +270,7 @@ def test_persistence(setup_integration):
     acceptor = setup_integration["acceptor"]
     persistence = setup_integration["persistence"]
     temp_dir = setup_integration["temp_dir"]
-    
+
     # Setup some state
     acceptor.promises = {300: 70, 301: 80}
     acceptor.accepted = {300: (70, {"data": "persistent data"})}
@@ -278,7 +278,7 @@ def test_persistence(setup_integration):
     acceptor.accept_requests_processed = 5
     acceptor.promises_made = 8
     acceptor.proposals_accepted = 3
-    
+
     # Save state
     loop = asyncio.get_event_loop()
     loop.run_until_complete(persistence.save_state({
@@ -289,15 +289,17 @@ def test_persistence(setup_integration):
         "promises_made": acceptor.promises_made,
         "proposals_accepted": acceptor.proposals_accepted
     }))
-    
+
     # Check if state file exists
     state_file = Path(temp_dir) / f"acceptor_1_state.json"
     assert state_file.exists()
-    
+
     # Create a new persistence instance and load state
     new_persistence = setup_integration["persistence"].__class__(node_id=1, data_dir=temp_dir)
-    loaded_state = new_persistence.load_state()
     
+    # Carregamento síncrono
+    loaded_state = new_persistence.load_state()
+
     # Check loaded state (keys are converted to strings in JSON)
     assert str(300) in loaded_state["promises"]
     assert str(301) in loaded_state["promises"]

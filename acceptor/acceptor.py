@@ -81,7 +81,7 @@ class Acceptor:
         
         # Load state from persistence if available
         if self.persistence:
-            state = self.persistence.load_state()
+            state = await self.persistence.load_state()
             
             async with self.state_lock:
                 self.promises = state.get("promises", {})

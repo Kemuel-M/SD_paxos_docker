@@ -21,7 +21,7 @@ from acceptor import Acceptor
 @pytest.fixture
 def mock_persistence():
     """Fixture that creates a mock persistence manager."""
-    persistence = AsyncMock()
+    persistence = MagicMock()
     persistence.load_state.return_value = {
         "promises": {},
         "accepted": {},

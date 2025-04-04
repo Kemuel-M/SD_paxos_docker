@@ -66,7 +66,7 @@ class AcceptorPersistence:
                 with open(self.state_file, 'r') as f:
                     state = json.load(f)
                     logger.info(f"State loaded successfully: {len(state.get('promises', {}))} promises, "
-                               f"{len(state.get('accepted', {}))} accepted values")
+                            f"{len(state.get('accepted', {}))} accepted values")
                     return state
         except Exception as e:
             logger.error(f"Error loading state: {e}", exc_info=True)
@@ -172,7 +172,7 @@ class AcceptorPersistence:
         except Exception as e:
             logger.error(f"Error cleaning up old checkpoints: {e}", exc_info=True)
     
-    def _restore_from_checkpoint(self) -> Dict[str, Any]:
+    async def _restore_from_checkpoint(self) -> Dict[str, Any]:
         """
         Try to restore state from the most recent checkpoint.
         
