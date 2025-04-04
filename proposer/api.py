@@ -49,6 +49,7 @@ def get_current_debug_state():
     """
     Retorna o estado atual do debug para uso em endpoints.
     """
+    from common.logging import DEBUG, DEBUG_LEVEL
     return {
         "enabled": DEBUG,
         "level": DEBUG_LEVEL

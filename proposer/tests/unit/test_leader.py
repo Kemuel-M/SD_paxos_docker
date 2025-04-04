@@ -12,6 +12,13 @@ from unittest.mock import MagicMock, patch, AsyncMock
 os.environ["DEBUG"] = "true"
 os.environ["NODE_ID"] = "1"
 
+# fixture para configurar o logging
+@pytest.fixture(scope="module", autouse=True)
+def setup_module_logging():
+    from common.logging import setup_logging
+    setup_logging("leader-test", debug=True)
+    yield
+
 from leader import LeaderElection
 
 @pytest.fixture
