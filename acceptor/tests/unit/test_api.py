@@ -263,33 +263,49 @@ def test_logs_important_endpoint(api_client):
     assert "logs" in data
 
 def test_stats_endpoint(api_client, mock_acceptor):
-    """Test the /stats endpoint."""
-    # Configurar o mock_acceptor.get_status para incluir instance_id_range
-    mock_status = mock_acceptor.get_status.return_value
-    mock_status["instance_id_range"] = "1-2"  # Valor de exemplo para teste
+    """Testa o endpoint /stats da API para rede Multi-Paxos."""
+    # Configurar mock do get_status com dados detalhados
+    mock_status = {
+        "node_id": 1,
+        "state": "running",
+        "prepare_requests_processed": 10,
+        "accept_requests_processed": 5,
+        "promises_made": 8,
+        "proposals_accepted": 3,
+        "active_instances": 2,
+        "accepted_instances": 1,
+        "instance_id_range": "1-5"  # Faixa de IDs de instância para Multi-Paxos
+    }
+    mock_acceptor.get_status.return_value = mock_status
     
-    # Send request
+    # Envia requisição para o endpoint de stats
     response = api_client.get("/stats")
     
-    # Check response
+    # Verifica resposta
     assert response.status_code == 200
     data = response.json()
     assert "stats" in data
     stats = data["stats"]
     
-    # Verificar campos principais
+    # Verifica campos essenciais para Multi-Paxos
     assert "uptime" in stats
-    assert "node_id" in stats
-    assert "prepare_requests_processed" in stats
-    assert "accept_requests_processed" in stats
-    assert "promises_made" in stats
-    assert "proposals_accepted" in stats
-    assert "active_instances" in stats
-    assert "accepted_instances" in stats
+    assert stats["node_id"] == 1
+    assert stats["prepare_requests_processed"] == 10
+    assert stats["accept_requests_processed"] == 5
+    assert stats["promises_made"] == 8
+    assert stats["proposals_accepted"] == 3
+    assert stats["active_instances"] == 2
+    assert stats["accepted_instances"] == 1
     
-    # Verificar instance_id_range
+    # Verifica a faixa de IDs de instância (crucial para Multi-Paxos)
     assert "instance_id_range" in stats
-    assert stats["instance_id_range"] == "1-2"
+    assert stats["instance_id_range"] == "1-5"
+    
+    # Em modo de debug avançado, verifica informações adicionais
+    if mock_acceptor.get_status.return_value.get("debug_level") in ["advanced", "trace"]:
+        assert "memory_usage" in stats
+        assert "promises_size" in stats["memory_usage"]
+        assert "accepted_size" in stats["memory_usage"]
 
 def test_debug_config_endpoint(api_client):
     """Test the /debug/config endpoint."""

@@ -196,34 +196,35 @@ def create_api(acceptor, persistence):
         from common.logging import get_important_log_entries
         return {"logs": get_important_log_entries("acceptor", limit=limit)}
     
-@app.get("/stats")
-async def get_stats():
-    """Return acceptor statistics."""
-    # Use synchronous get_status - obter todos os dados necessários de uma vez
-    status = acceptor.get_status()
-    
-    stats = {
-        # Manter o uso do timestamp de início para uptime
-        "uptime": time.time() - start_time,
+    # Endpoint for getting stats
+    @app.get("/stats")
+    async def get_stats():
+        """Return acceptor statistics."""
+        # Use synchronous get_status to get all required data at once
+        status = acceptor.get_status()
         
-        # Usar apenas dados do status retornado pelo método encapsulado
-        "node_id": status["node_id"],
-        "prepare_requests_processed": status["prepare_requests_processed"],
-        "accept_requests_processed": status["accept_requests_processed"],
-        "promises_made": status["promises_made"],
-        "proposals_accepted": status["proposals_accepted"],
-        "active_instances": status["active_instances"],
-        "accepted_instances": status["accepted_instances"],
-        "instance_id_range": status["instance_id_range"]
-    }
-    
-    # Opcional: adicionar informações de carga do sistema
-    if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
-        stats["memory_usage"] = {
-            "promises_size": len(status.get("active_instances", 0)),
-            "accepted_size": len(status.get("accepted_instances", 0))
+        stats = {
+            # Keep using start time for uptime
+            "uptime": time.time() - start_time,
+            
+            # Use only data from the status method
+            "node_id": status["node_id"],
+            "prepare_requests_processed": status["prepare_requests_processed"],
+            "accept_requests_processed": status["accept_requests_processed"],
+            "promises_made": status["promises_made"],
+            "proposals_accepted": status["proposals_accepted"],
+            "active_instances": status["active_instances"],
+            "accepted_instances": status["accepted_instances"],
+            "instance_id_range": status.get("instance_id_range", "N/A-N/A")
         }
-    
-    return {"stats": stats}
+        
+        # Optional: add system load information
+        if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
+            stats["memory_usage"] = {
+                "promises_size": len(status.get("active_instances", 0)),
+                "accepted_size": len(status.get("accepted_instances", 0))
+            }
+        
+        return {"stats": stats}
     
     return app
