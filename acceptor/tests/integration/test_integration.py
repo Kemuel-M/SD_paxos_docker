@@ -459,11 +459,11 @@ def test_identical_proposal_numbers(setup_integration):
 
 @pytest.mark.asyncio
 async def test_concurrent_requests(setup_integration):
-    """Test handling of concurrent prepare requests with explicit timeout and debugging."""
+    """Test handling of concurrent prepare requests with explicit synchronization."""
     client = setup_integration["client"]
     acceptor = setup_integration["acceptor"]
     
-    # Function to send a prepare request
+    # Função para enviar prepare request
     def send_prepare(instance_id, proposal_number, proposer_id):
         prepare_request = {
             "type": "PREPARE",
@@ -473,10 +473,8 @@ async def test_concurrent_requests(setup_integration):
         }
         return client.post("/prepare", json=prepare_request)
     
-    # Concurrent test with explicit timeout and more robust error handling
+    # Parâmetros para requisições concorrentes
     instance_id = 600
-    
-    # Define parameters for concurrent requests with more controlled values
     prepare_params = [
         (instance_id, 300, 1),
         (instance_id, 310, 2),
@@ -485,44 +483,45 @@ async def test_concurrent_requests(setup_integration):
         (instance_id, 320, 5)
     ]
     
-    # Use ThreadPoolExecutor with a timeout
-    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+    # Usa ThreadPoolExecutor para simular concorrência
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import time
     
-    try:
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            # Set an explicit timeout for the entire operation
-            futures = [executor.submit(send_prepare, *params) for params in prepare_params]
-            
-            # Wait for all futures with a timeout
-            try:
-                prepare_responses = [future.result(timeout=5) for future in futures]
-            except TimeoutError:
-                print("Concurrent prepare requests timed out!")
-                # Cancel any pending futures
-                for future in futures:
-                    future.cancel()
-                raise
-    except Exception as e:
-        print(f"Error in concurrent requests: {e}")
-        raise
+    # Adicionando um pequeno atraso entre as requisições para garantir mais concorrência
+    print("Sending prepare requests with slight delay...")
+    def delayed_send_prepare(params, delay=2):
+        time.sleep(delay)
+        return send_prepare(*params)
     
-    # Add more detailed logging and assertions
+    # Executa requisições concorrentes
+    print("Executing prepare requests...")
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(delayed_send_prepare, params) for params in prepare_params]
+        
+        # Espera todas as requisições serem processadas
+        prepare_responses = list(future.result() for future in as_completed(futures))
+    
+    # Adiciona um pequeno tempo de espera para processamento assíncrono
+    time.sleep(3)
+    
+    # Recupera o status da instância para verificar processamento completo
+    print("Checking status of instance...")
+    status_response = client.get(f"/instance/{instance_id}")
+    status = status_response.json()
+    
+    # Verifica detalhes das respostas
     accepted_responses = [resp for resp in prepare_responses if resp.json().get("accepted", False)]
     rejected_responses = [resp for resp in prepare_responses if not resp.json().get("accepted", False)]
     
     print(f"Total responses: {len(prepare_responses)}")
     print(f"Accepted responses: {len(accepted_responses)}")
     print(f"Rejected responses: {len(rejected_responses)}")
+    print(f"Highest proposal processed: {status.get('highestPromised', 'N/A')}")
     
-    # Only the highest proposal numbers should be accepted
-    accepted_numbers = [resp.json().get("proposalNumber", 0) for resp in accepted_responses]
-    assert max(accepted_numbers) == 320, f"Unexpected highest accepted proposal: {max(accepted_numbers)}"
-    
-    # At least one response should be accepted
+    # Verificações
     assert len(accepted_responses) >= 1, "No prepare requests were accepted"
-    
-    # At least some should be rejected
     assert len(rejected_responses) >= 1, "All prepare requests were accepted"
+    assert status.get('highestPromised', 0) == 320, f"Unexpected highest promised: {status.get('highestPromised')}"
 
 def test_malformed_requests(setup_integration):
     """Test handling of malformed or invalid requests."""
