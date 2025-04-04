@@ -419,38 +419,38 @@ class Acceptor:
             logger.error(f"Failed to notify learner {learner}: {e}")
             return False
     
-def get_status(self) -> Dict[str, Any]:
-    """
-    Get the current status of the acceptor synchronously.
-    
-    Returns:
-        Dict[str, Any]: Status information
-    """
-    # Calcular instance_id_range de maneira segura
-    if self.promises:
-        try:
-            min_id = min(self.promises.keys())
-            max_id = max(self.promises.keys())
-            instance_id_range = f"{min_id}-{max_id}"
-        except (ValueError, TypeError):
-            # Lidar com casos em que as chaves não são iteráveis ou estão vazias
+    def get_status(self) -> Dict[str, Any]:
+        """
+        Get the current status of the acceptor synchronously.
+        
+        Returns:
+            Dict[str, Any]: Status information
+        """
+        # Calcular instance_id_range de maneira segura
+        if self.promises:
+            try:
+                min_id = min(self.promises.keys())
+                max_id = max(self.promises.keys())
+                instance_id_range = f"{min_id}-{max_id}"
+            except (ValueError, TypeError):
+                # Lidar com casos em que as chaves não são iteráveis ou estão vazias
+                instance_id_range = "N/A-N/A"
+        else:
             instance_id_range = "N/A-N/A"
-    else:
-        instance_id_range = "N/A-N/A"
-    
-    return {
-        "node_id": self.node_id,
-        "state": "running" if self.running else "stopped",
-        "learners": len(self.learners),
-        "active_instances": len(self.promises),
-        "accepted_instances": len(self.accepted),
-        "prepare_requests_processed": self.prepare_requests_processed,
-        "accept_requests_processed": self.accept_requests_processed,
-        "promises_made": self.promises_made,
-        "proposals_accepted": self.proposals_accepted,
-        "instance_id_range": instance_id_range,
-        "timestamp": current_timestamp()
-    }
+        
+        return {
+            "node_id": self.node_id,
+            "state": "running" if self.running else "stopped",
+            "learners": len(self.learners),
+            "active_instances": len(self.promises),
+            "accepted_instances": len(self.accepted),
+            "prepare_requests_processed": self.prepare_requests_processed,
+            "accept_requests_processed": self.accept_requests_processed,
+            "promises_made": self.promises_made,
+            "proposals_accepted": self.proposals_accepted,
+            "instance_id_range": instance_id_range,
+            "timestamp": current_timestamp()
+        }
     
     def get_instance_info(self, instance_id: int) -> Dict[str, Any]:
         """
