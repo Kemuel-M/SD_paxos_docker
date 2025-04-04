@@ -66,9 +66,12 @@ def mock_acceptor():
         {}
     ))
     
-    # Mock asynchronous methods
+    # Configure asynchronous methods
     acceptor.process_prepare = AsyncMock(return_value={"accepted": True, "proposalNumber": 42, "instanceId": 1, "acceptorId": 1})
     acceptor.process_accept = AsyncMock(return_value={"accepted": True, "proposalNumber": 42, "instanceId": 1, "acceptorId": 1})
+    
+    # Adicione esta linha para definir promises como um dicionário real
+    acceptor.promises = {1: 10, 2: 20}
     
     return acceptor
 
@@ -110,18 +113,19 @@ def test_prepare_endpoint(api_client, mock_acceptor):
         "type": "PREPARE",
         "proposalNumber": 20,
         "instanceId": 1,
-        "proposerId": 2
+        "proposerId": 2,
+        "clientRequest": {}
     }
-    
+
     # Reset the mock
     mock_acceptor.process_prepare.reset_mock()
-    
+
     # Send request
     response = api_client.post("/prepare", json=prepare_request)
-    
+
     # Check response
     assert response.status_code == 200
-    
+
     # Check if acceptor method was called
     mock_acceptor.process_prepare.assert_called_once()
     args, kwargs = mock_acceptor.process_prepare.call_args
@@ -260,6 +264,10 @@ def test_logs_important_endpoint(api_client):
 
 def test_stats_endpoint(api_client, mock_acceptor):
     """Test the /stats endpoint."""
+    # Configurar o mock_acceptor.get_status para incluir instance_id_range
+    mock_status = mock_acceptor.get_status.return_value
+    mock_status["instance_id_range"] = "1-2"  # Valor de exemplo para teste
+    
     # Send request
     response = api_client.get("/stats")
     
@@ -268,6 +276,8 @@ def test_stats_endpoint(api_client, mock_acceptor):
     data = response.json()
     assert "stats" in data
     stats = data["stats"]
+    
+    # Verificar campos principais
     assert "uptime" in stats
     assert "node_id" in stats
     assert "prepare_requests_processed" in stats
@@ -276,6 +286,10 @@ def test_stats_endpoint(api_client, mock_acceptor):
     assert "proposals_accepted" in stats
     assert "active_instances" in stats
     assert "accepted_instances" in stats
+    
+    # Verificar instance_id_range
+    assert "instance_id_range" in stats
+    assert stats["instance_id_range"] == "1-2"
 
 def test_debug_config_endpoint(api_client):
     """Test the /debug/config endpoint."""

@@ -252,20 +252,23 @@ async def test_process_accept_first_time(acceptor):
         "proposerId": 2,
         "value": {"clientId": "client-1", "value": "test"}
     }
-    
+
     # Mock the notify_learners method
     acceptor.notify_learners = AsyncMock()
-    
+
     # Process the accept message
     await acceptor.start()
     response = await acceptor.process_accept(accept_msg)
     
+    # Add a small delay to allow the async task to complete
+    await asyncio.sleep(0.1)
+
     # Check response
     assert response["accepted"] == True
     assert response["proposalNumber"] == 42
     assert response["instanceId"] == 1
     assert response["acceptorId"] == 1
-    
+
     # Check state
     assert 1 in acceptor.promises
     assert 1 in acceptor.accepted
@@ -274,12 +277,12 @@ async def test_process_accept_first_time(acceptor):
     assert acceptor.accepted[1][1] == {"clientId": "client-1", "value": "test"}
     assert acceptor.accept_requests_processed == 1
     assert acceptor.proposals_accepted == 1
-    
+
     # Check notification to learners
     acceptor.notify_learners.assert_called_once_with(
         1, 42, {"clientId": "client-1", "value": "test"}
     )
-    
+
     # Check persistence
     acceptor.persistence.save_state.assert_called()
 

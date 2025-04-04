@@ -196,31 +196,34 @@ def create_api(acceptor, persistence):
         from common.logging import get_important_log_entries
         return {"logs": get_important_log_entries("acceptor", limit=limit)}
     
-    # Endpoint for statistics
-    @app.get("/stats")
-    async def get_stats():
-        """Return acceptor statistics."""
-        # Use synchronous get_status
-        status = acceptor.get_status()
+@app.get("/stats")
+async def get_stats():
+    """Return acceptor statistics."""
+    # Use synchronous get_status - obter todos os dados necessários de uma vez
+    status = acceptor.get_status()
+    
+    stats = {
+        # Manter o uso do timestamp de início para uptime
+        "uptime": time.time() - start_time,
         
-        stats = {
-            "uptime": time.time() - start_time,
-            "node_id": status["node_id"],
-            "prepare_requests_processed": status["prepare_requests_processed"],
-            "accept_requests_processed": status["accept_requests_processed"],
-            "promises_made": status["promises_made"],
-            "proposals_accepted": status["proposals_accepted"],
-            "active_instances": status["active_instances"],
-            "accepted_instances": status["accepted_instances"]
+        # Usar apenas dados do status retornado pelo método encapsulado
+        "node_id": status["node_id"],
+        "prepare_requests_processed": status["prepare_requests_processed"],
+        "accept_requests_processed": status["accept_requests_processed"],
+        "promises_made": status["promises_made"],
+        "proposals_accepted": status["proposals_accepted"],
+        "active_instances": status["active_instances"],
+        "accepted_instances": status["accepted_instances"],
+        "instance_id_range": status["instance_id_range"]
+    }
+    
+    # Opcional: adicionar informações de carga do sistema
+    if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
+        stats["memory_usage"] = {
+            "promises_size": len(status.get("active_instances", 0)),
+            "accepted_size": len(status.get("accepted_instances", 0))
         }
-        
-        # Add instance ID range if there are active instances
-        if acceptor.promises:
-            stats["instance_id_range"] = f"{min(acceptor.promises.keys()) if acceptor.promises else 'N/A'}-" \
-                                        f"{max(acceptor.promises.keys()) if acceptor.promises else 'N/A'}"
-        else:
-            stats["instance_id_range"] = "N/A"
-        
-        return {"stats": stats}
+    
+    return {"stats": stats}
     
     return app
