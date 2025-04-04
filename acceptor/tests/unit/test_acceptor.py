@@ -100,25 +100,37 @@ async def test_process_prepare_first_promise(acceptor):
         "proposerId": 2
     }
     
-    # Process the prepare message
-    await acceptor.start()
-    response = await acceptor.process_prepare(prepare_msg)
-    
-    # Check response
-    assert response["accepted"] == True
-    assert response["highestAccepted"] == -1
-    assert "acceptedValue" not in response
-    assert response["instanceId"] == 1
-    assert response["acceptorId"] == 1
-    
-    # Check state
-    assert 1 in acceptor.promises
-    assert acceptor.promises[1] == 42
-    assert acceptor.prepare_requests_processed == 1
-    assert acceptor.promises_made == 1
-    
-    # Check persistence (save_state should be called)
-    acceptor.persistence.save_state.assert_called()
+    # Patch the create_task method to track if it's called with save_state
+    with patch('asyncio.create_task') as mock_create_task:
+        # Process the prepare message
+        await acceptor.start()
+        response = await acceptor.process_prepare(prepare_msg)
+        
+        # Check response
+        assert response["accepted"] == True
+        assert response["highestAccepted"] == -1
+        assert "acceptedValue" not in response
+        assert response["instanceId"] == 1
+        assert response["acceptorId"] == 1
+        
+        # Check state
+        assert 1 in acceptor.promises
+        assert acceptor.promises[1] == 42
+        assert acceptor.prepare_requests_processed == 1
+        assert acceptor.promises_made == 1
+        
+        # Check if create_task was called with save_state
+        # Find if any call to create_task involved save_state
+        save_state_called = False
+        for call in mock_create_task.call_args_list:
+            # The first argument is the coroutine
+            coro = call[0][0]
+            # Check if this coroutine is from save_state method
+            if coro.__qualname__.endswith('save_state'):
+                save_state_called = True
+                break
+                
+        assert save_state_called, "Expected asyncio.create_task to be called with save_state()"
 
 @pytest.mark.asyncio
 async def test_save_state(acceptor, mock_persistence):
