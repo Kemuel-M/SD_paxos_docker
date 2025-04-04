@@ -104,9 +104,11 @@ def create_api(acceptor, persistence):
         return result
     
     # Endpoint for acceptor status
+
     @app.get("/status", response_model=StatusResponse)
     async def get_status():
         status = acceptor.get_status()
+        # Calcula o uptime de forma síncrona
         status["uptime"] = time.time() - start_time
         return status
     

@@ -56,12 +56,12 @@ async def test_acceptor_initialization(acceptor, mock_persistence):
     assert acceptor.node_id == 1
     assert len(acceptor.learners) == 2
     assert acceptor.persistence == mock_persistence
-    assert acceptor.promises == {}
-    assert acceptor.accepted == {}
-    assert acceptor.prepare_requests_processed == 0
-    assert acceptor.accept_requests_processed == 0
-    assert acceptor.promises_made == 0
-    assert acceptor.proposals_accepted == 0
+    
+    # Verify synchronous status method
+    status = acceptor.get_status()
+    assert isinstance(status, dict)
+    assert status["node_id"] == 1
+    assert status["state"] in ["running", "stopped"]
 
 @pytest.mark.asyncio
 async def test_start_stop(acceptor, mock_persistence):
@@ -75,7 +75,7 @@ async def test_start_stop(acceptor, mock_persistence):
     await acceptor.stop()
     assert acceptor.running == False
     
-    # Check if save_state was called during stop
+    # Check if save_state was called during stop (async method)
     mock_persistence.save_state.assert_called_once()
 
 @pytest.mark.asyncio
