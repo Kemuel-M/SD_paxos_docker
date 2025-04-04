@@ -30,6 +30,8 @@ def mock_persistence():
         "promises_made": 0,
         "proposals_accepted": 0
     }
+    # Make save_state an async method
+    persistence.save_state = AsyncMock()
     return persistence
 
 @pytest.fixture
@@ -68,10 +70,12 @@ async def test_start_stop(acceptor, mock_persistence):
     await acceptor.start()
     assert acceptor.running == True
     mock_persistence.load_state.assert_called_once()
-    
-    # Stop
+
+    # Stop 
     await acceptor.stop()
     assert acceptor.running == False
+    
+    # Check if save_state was called during stop
     mock_persistence.save_state.assert_called_once()
 
 @pytest.mark.asyncio
@@ -104,6 +108,32 @@ async def test_process_prepare_first_promise(acceptor):
     
     # Check persistence
     acceptor.persistence.save_state.assert_called()
+
+@pytest.mark.asyncio
+async def test_save_state(acceptor, mock_persistence):
+    """Test saving state."""
+    # Manually set some state
+    acceptor.promises = {1: 42}
+    acceptor.accepted = {1: (42, {"value": "test"})}
+    acceptor.prepare_requests_processed = 5
+    acceptor.accept_requests_processed = 3
+    acceptor.promises_made = 2
+    acceptor.proposals_accepted = 1
+
+    # Save state
+    await acceptor.save_state()
+
+    # Verify save_state was called with correct state
+    mock_persistence.save_state.assert_called_once()
+    
+    # Check the arguments passed to save_state
+    saved_state = mock_persistence.save_state.call_args[0][0]
+    assert saved_state["promises"] == {1: 42}
+    assert saved_state["accepted"] == {1: (42, {"value": "test"})}
+    assert saved_state["prepare_requests_processed"] == 5
+    assert saved_state["accept_requests_processed"] == 3
+    assert saved_state["promises_made"] == 2
+    assert saved_state["proposals_accepted"] == 1
 
 @pytest.mark.asyncio
 async def test_process_prepare_higher_number(acceptor):

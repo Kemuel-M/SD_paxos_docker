@@ -81,17 +81,16 @@ class Acceptor:
         
         # Load state from persistence if available
         if self.persistence:
-            state = await self.persistence.load_state()
+            # Use synchronous load_state method
+            state = self.persistence.load_state()
             
             async with self.state_lock:
-                self.promises = state.get("promises", {})
-                self.accepted = state.get("accepted", {})
-                
                 # Convert keys from strings to integers (JSON serialization effect)
-                self.promises = {int(k): v for k, v in self.promises.items()}
-                self.accepted = {int(k): v for k, v in self.accepted.items()}
+                # Use .get() to provide safe defaults if keys are missing
+                self.promises = {int(k): v for k, v in state.get("promises", {}).items()}
+                self.accepted = {int(k): v for k, v in state.get("accepted", {}).items()}
                 
-                # Load statistics
+                # Load statistics with safe defaults
                 self.prepare_requests_processed = state.get("prepare_requests_processed", 0)
                 self.accept_requests_processed = state.get("accept_requests_processed", 0)
                 self.promises_made = state.get("promises_made", 0)

@@ -172,7 +172,7 @@ class AcceptorPersistence:
         except Exception as e:
             logger.error(f"Error cleaning up old checkpoints: {e}", exc_info=True)
     
-    async def _restore_from_checkpoint(self) -> Dict[str, Any]:
+    def _restore_from_checkpoint(self) -> Dict[str, Any]:
         """
         Try to restore state from the most recent checkpoint.
         
