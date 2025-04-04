@@ -42,6 +42,8 @@ class Acceptor:
         self.node_id = node_id
         self.learners = learners if learners else []
         self.persistence = persistence
+
+        self._pending_tasks = []  # Inicializa a lista de tarefas pendentes
         
         # State structures (will be loaded from persistence)
         self.promises = {}  # instanceId -> highest proposal number promised
@@ -109,6 +111,11 @@ class Acceptor:
             return
             
         self.running = False
+
+        # Cancele todas as tarefas pendentes aqui
+        for task in self._pending_tasks:
+            if not task.done():
+                task.cancel()
         
         # Persist state before stopping
         if self.persistence:

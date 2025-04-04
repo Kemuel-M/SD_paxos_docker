@@ -15,6 +15,9 @@ from unittest.mock import MagicMock, patch, AsyncMock
 from fastapi.testclient import TestClient
 from concurrent.futures import ThreadPoolExecutor
 
+import warnings
+warnings.filterwarnings("always", category=RuntimeWarning)
+
 # Configure environment for testing
 os.environ["DEBUG"] = "true"
 os.environ["DEBUG_LEVEL"] = "basic"
@@ -76,7 +79,14 @@ def setup_integration():
         }
         
         # Cleanup
+        loop = asyncio.get_event_loop()
         loop.run_until_complete(acceptor.stop())
+        loop.run_until_complete(asyncio.sleep(0.1))  # Dê tempo para tarefas finalizarem
+        tasks = asyncio.all_tasks(loop)
+        for task in tasks:
+            if not task.done() and task != asyncio.current_task():
+                task.cancel()
+        loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
         try:
             shutil.rmtree(temp_dir)
             shutil.rmtree(os.environ["LOG_DIR"])

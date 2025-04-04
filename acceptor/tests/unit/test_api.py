@@ -9,6 +9,9 @@ import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import MagicMock, patch, AsyncMock
 
+import warnings
+warnings.filterwarnings("always", category=RuntimeWarning)
+
 # Configure environment for testing
 os.environ["DEBUG"] = "true"
 os.environ["DEBUG_LEVEL"] = "basic"
@@ -123,7 +126,7 @@ def test_prepare_endpoint(api_client, mock_acceptor):
     # Check if acceptor method was called
     mock_acceptor.process_prepare.assert_called_once()
     args, kwargs = mock_acceptor.process_prepare.call_args
-    
+
     expected_request = prepare_request.copy()
     expected_request["clientRequest"] = {}
     assert args[0] == expected_request

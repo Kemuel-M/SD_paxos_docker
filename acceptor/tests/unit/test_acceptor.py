@@ -9,6 +9,9 @@ import pytest
 import asyncio
 from unittest.mock import MagicMock, patch, AsyncMock
 
+import warnings
+warnings.filterwarnings("always", category=RuntimeWarning)
+
 # Configure environment for testing
 os.environ["DEBUG"] = "true"
 os.environ["NODE_ID"] = "1"

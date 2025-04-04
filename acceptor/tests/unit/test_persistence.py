@@ -12,6 +12,9 @@ import shutil
 from pathlib import Path
 from unittest.mock import patch, AsyncMock
 
+import warnings
+warnings.filterwarnings("always", category=RuntimeWarning)
+
 # Configure environment for testing
 os.environ["DEBUG"] = "true"
 os.environ["NODE_ID"] = "1"
