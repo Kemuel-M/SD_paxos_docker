@@ -79,7 +79,13 @@ async def test_start_stop(acceptor, mock_persistence):
     await acceptor.stop()
     assert acceptor.running == False
     
-    # Check if save_state was called during stop (async method)
+    # Verify save_state was called during stop
+    mock_persistence.save_state.assert_called_once()
+    
+    # Reset the mock
+    mock_persistence.save_state.reset_mock()
+    
+    # Now test explicit call to save_state
     await acceptor.save_state()
     mock_persistence.save_state.assert_called_once()
 
