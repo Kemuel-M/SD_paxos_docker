@@ -329,7 +329,7 @@ async def test_process_accept_same_as_promised(acceptor):
     # Check notification to learners
     acceptor.notify_learners.assert_called_once()
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio  
 async def test_notify_learners(acceptor):
     """Test notifying learners about accepted proposals."""
     # Mock the _notify_learner method
@@ -352,7 +352,7 @@ async def test_notify_learners(acceptor):
         assert notification["instanceId"] == 1
         assert notification["proposalNumber"] == 42
         assert notification["acceptorId"] == 1
-        assert notification["accepted"] == True
+        assert notification["accepted"] == True  
         assert notification["value"] == {"value": "test"}
         assert "timestamp" in notification
 

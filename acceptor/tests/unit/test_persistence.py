@@ -44,18 +44,31 @@ def test_initialization(persistence, temp_data_dir):
     assert persistence.temp_file == Path(temp_data_dir) / "acceptor_1_state.tmp.json"
     assert persistence.checkpoint_dir == Path(temp_data_dir) / "checkpoints"
 
-def test_load_state_new(persistence):
-    """Test loading state when no file exists."""
-    # Load state (no file exists)
+def test_load_state(persistence):
+    """Test loading state from existing file."""
+    # Create state file
+    test_state = {
+        "promises": {"42": 100},
+        "accepted": {"42": [100, {"value": "test"}]}, 
+        "prepare_requests_processed": 42,
+        "accept_requests_processed": 30,
+        "promises_made": 15,
+        "proposals_accepted": 10
+    }
+    
+    with open(persistence.state_file, 'w') as f:
+        json.dump(test_state, f)
+    
+    # Load state (synchronous)
     state = persistence.load_state()
     
-    # Check if returned default state
-    assert "promises" in state
-    assert "accepted" in state
-    assert state["promises"] == {}
-    assert state["accepted"] == {}
-    assert state["prepare_requests_processed"] == 0
-    assert state["accept_requests_processed"] == 0
+    # Check if loaded correctly (keys are converted to strings in JSON)
+    assert state["promises"] == {"42": 100}  
+    assert state["accepted"] == {"42": [100, {"value": "test"}]}
+    assert state["prepare_requests_processed"] == 42
+    assert state["accept_requests_processed"] == 30
+    assert state["promises_made"] == 15
+    assert state["proposals_accepted"] == 10
 
 def test_load_state_existing(persistence):
     """Test loading state from existing file."""
