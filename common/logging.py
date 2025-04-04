@@ -1,5 +1,7 @@
 """
+File: common/logging.py
 Sistema de logging unificado para todos os componentes.
+Melhorado com níveis de debug configuráveis e suporte para logging estruturado.
 """
 import os
 import sys
@@ -11,8 +13,9 @@ from typing import Dict, Any, List, Optional
 from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from collections import deque
 
-# Configuração
+# Configuração com suporte a múltiplos níveis de debug
 DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
+DEBUG_LEVEL = os.getenv("DEBUG_LEVEL", "basic").lower()  # Níveis: basic, advanced, trace
 LOG_DIR = os.getenv("LOG_DIR", "/data/logs")
 
 # Níveis de log
@@ -35,17 +38,19 @@ log_buffer_size = 1000  # Tamanho máximo do buffer por componente
 # Timestamp de início para cálculo de uptime
 start_time = time.time()
 
-def setup_logging(component_name: str, debug: bool = None, log_dir: str = None):
+def setup_logging(component_name: str, debug: bool = None, debug_level: str = None, log_dir: str = None):
     """
     Configura o sistema de logging para um componente.
     
     Args:
         component_name: Nome do componente
         debug: Se True, habilita logs de DEBUG (sobrescreve variável de ambiente)
+        debug_level: Nível de debug (basic, advanced, trace) (sobrescreve variável de ambiente)
         log_dir: Diretório para salvar logs (sobrescreve variável de ambiente)
     """
     # Usa valores de parâmetros ou fallback para variáveis de ambiente
     debug_enabled = debug if debug is not None else DEBUG
+    debug_level_value = debug_level if debug_level is not None else DEBUG_LEVEL
     logs_directory = log_dir if log_dir is not None else LOG_DIR
     
     # Cria diretório de logs se não existir
@@ -59,10 +64,18 @@ def setup_logging(component_name: str, debug: bool = None, log_dir: str = None):
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
     
+    # Configura formatos baseados no nível de debug
+    if debug_enabled and debug_level_value in ("advanced", "trace"):
+        # Formato detalhado para debug avançado
+        console_format = JsonFormatter(component_name, detailed=True)
+    else:
+        # Formato padrão para uso normal
+        console_format = JsonFormatter(component_name, detailed=False)
+    
     # Adiciona handler para console
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.DEBUG if debug_enabled else logging.INFO)
-    console_handler.setFormatter(JsonFormatter(component_name))
+    console_handler.setFormatter(console_format)
     root_logger.addHandler(console_handler)
     
     # Adiciona handler para arquivo completo (todos os logs)
@@ -73,7 +86,7 @@ def setup_logging(component_name: str, debug: bool = None, log_dir: str = None):
         backupCount=5
     )
     file_handler.setLevel(logging.DEBUG if debug_enabled else logging.INFO)
-    file_handler.setFormatter(JsonFormatter(component_name))
+    file_handler.setFormatter(JsonFormatter(component_name, detailed=True))  # Sempre detalhado em arquivo
     root_logger.addHandler(file_handler)
     
     # Adiciona handler para arquivo de logs importantes (IMPORTANT e acima)
@@ -85,7 +98,7 @@ def setup_logging(component_name: str, debug: bool = None, log_dir: str = None):
         backupCount=7
     )
     important_handler.setLevel(LEVELS["IMPORTANT"])
-    important_handler.setFormatter(JsonFormatter(component_name))
+    important_handler.setFormatter(JsonFormatter(component_name, detailed=True))  # Sempre detalhado para importantes
     root_logger.addHandler(important_handler)
     
     # Inicializa buffer para este componente
@@ -113,7 +126,10 @@ def setup_logging(component_name: str, debug: bool = None, log_dir: str = None):
     logging.setLogRecordFactory(record_factory)
     
     logger = logging.getLogger(component_name)
-    logger.info(f"Logging inicializado para {component_name}. Debug: {debug_enabled}")
+    logger.info(f"Logging inicializado para {component_name}. Debug: {debug_enabled}, Nível: {debug_level_value}")
+    
+    if debug_enabled and debug_level_value in ("advanced", "trace"):
+        logger.debug(f"Configuração detalhada de logging: dir={logs_directory}, buffer_size={log_buffer_size}")
     
     return logger
 
@@ -138,18 +154,20 @@ def add_to_buffer(component: str, record: logging.LogRecord):
         "message": record.getMessage(),
         "module": record.module,
         "lineno": record.lineno,
+        "function": record.funcName,  # Adicionado nome da função para debugging mais fácil
         "context": getattr(record, "context", None)
     }
     
     # Adiciona ao buffer
     log_buffer[component].append(log_entry)
 
-def get_log_entries(component: str, limit: int = 100) -> List[Dict[str, Any]]:
+def get_log_entries(component: str, level: str = None, limit: int = 100) -> List[Dict[str, Any]]:
     """
     Obtém registros de log do buffer.
     
     Args:
         component: Nome do componente
+        level: Filtro opcional por nível de log
         limit: Número máximo de registros a retornar
     
     Returns:
@@ -160,6 +178,12 @@ def get_log_entries(component: str, limit: int = 100) -> List[Dict[str, Any]]:
     
     # Obtém últimos registros (mais recentes primeiro)
     entries = list(log_buffer[component])
+    
+    # Filtra por nível se especificado
+    if level:
+        entries = [e for e in entries if e["level"] == level.upper()]
+    
+    # Inverte para ter os mais recentes primeiro
     entries.reverse()
     
     return entries[:limit]
@@ -194,20 +218,48 @@ def get_uptime() -> float:
     """
     return time.time() - start_time
 
+def set_debug_level(enabled: bool, level: str = "basic"):
+    """
+    Atualiza o nível de debug em tempo de execução.
+    
+    Args:
+        enabled: Se True, habilita debug
+        level: Nível de debug (basic, advanced, trace)
+    """
+    global DEBUG, DEBUG_LEVEL
+    
+    # Atualiza variáveis globais
+    DEBUG = enabled
+    DEBUG_LEVEL = level
+    
+    # Atualiza níveis de todos os loggers
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG if enabled else logging.INFO)
+    
+    # Atualiza handlers
+    for handler in root_logger.handlers:
+        if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+            handler.setLevel(logging.DEBUG if enabled else logging.INFO)
+    
+    # Log de confirmação
+    logging.getLogger().info(f"Nível de debug alterado: enabled={enabled}, level={level}")
+
 class JsonFormatter(logging.Formatter):
     """
     Formatador que converte logs para formato JSON.
     """
     
-    def __init__(self, component: str):
+    def __init__(self, component: str, detailed: bool = False):
         """
         Inicializa o formatador.
         
         Args:
             component: Nome do componente
+            detailed: Se True, inclui campos adicionais no log
         """
         super().__init__()
         self.component = component
+        self.detailed = detailed
     
     def format(self, record: logging.LogRecord) -> str:
         """
@@ -226,11 +278,18 @@ class JsonFormatter(logging.Formatter):
             "level": record.levelname,
             "component": self.component,
             "node_id": getattr(record, "node_id", None),
-            "message": record.getMessage(),
-            "module": record.module,
-            "function": record.funcName,
-            "lineno": record.lineno
+            "message": record.getMessage()
         }
+        
+        # Campos adicionais para logs detalhados
+        if self.detailed:
+            log_data.update({
+                "module": record.module,
+                "function": record.funcName,
+                "lineno": record.lineno,
+                "thread": record.thread,
+                "process": record.process
+            })
         
         # Adiciona contexto se disponível
         context = getattr(record, "context", None)

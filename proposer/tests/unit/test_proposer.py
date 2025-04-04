@@ -1,4 +1,5 @@
 """
+File: proposer/tests/unit/test_proposer.py
 Testes unitários para o componente Proposer.
 """
 import os
@@ -70,6 +71,9 @@ async def test_propose_adds_to_queue(proposer):
     
     # Verifica se a proposta foi armazenada no cache
     assert 1 in proposer.proposals
+    
+    # Verifica se o campo attempt foi inicializado
+    assert proposer.proposals[1]["attempt"] == 0
 
 @pytest.mark.asyncio
 async def test_run_prepare_phase(proposer):
@@ -126,7 +130,7 @@ async def test_run_paxos_success(proposer):
     proposer._run_accept_phase = AsyncMock(return_value=True)
     
     # Executa Paxos
-    proposal = {"clientRequest": {"data": "test_data"}}
+    proposal = {"clientRequest": {"data": "test_data"}, "attempt": 0}
     result = await proposer._run_paxos(1, proposal)
     
     # Verifica resultado
@@ -143,7 +147,7 @@ async def test_run_paxos_prepare_failure(proposer):
     proposer._run_prepare_phase = AsyncMock(return_value={"success": False})
     
     # Executa Paxos
-    proposal = {"clientRequest": {"data": "test_data"}}
+    proposal = {"clientRequest": {"data": "test_data"}, "attempt": 0}
     result = await proposer._run_paxos(1, proposal)
     
     # Verifica resultado

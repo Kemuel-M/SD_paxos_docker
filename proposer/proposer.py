@@ -1,6 +1,8 @@
 """
+File: proposer/proposer.py
 Implementação principal do Proposer do algoritmo Paxos.
 Responsável por iniciar o processo de consenso e coordenar as fases do protocolo.
+Com melhorias para tratamento de casos de borda e debugging.
 """
 import os
 import time
@@ -13,8 +15,9 @@ from collections import defaultdict
 from common.communication import HttpClient, CircuitBreaker
 from common.utils import calculate_backoff, wait_with_backoff, current_timestamp
 
-# Configuração
+# Configuração aprimorada de debug
 DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
+DEBUG_LEVEL = os.getenv("DEBUG_LEVEL", "basic").lower()  # Níveis: basic, advanced, trace
 USE_CLUSTER_STORE = os.getenv("USE_CLUSTER_STORE", "false").lower() in ("true", "1", "yes")
 
 logger = logging.getLogger("proposer")
@@ -44,9 +47,9 @@ class Proposer:
             last_instance_id: Último ID de instância processado
         """
         self.node_id = node_id
-        self.acceptors = acceptors
-        self.learners = learners
-        self.stores = stores
+        self.acceptors = acceptors if acceptors else []
+        self.learners = learners if learners else []
+        self.stores = stores if stores else []
         self.proposal_counter = proposal_counter
         self.last_instance_id = last_instance_id
 
@@ -79,6 +82,14 @@ class Proposer:
         
         logger.info(f"Proposer {node_id} inicializado com {len(acceptors)} acceptors, "
                     f"{len(learners)} learners e {len(stores)} nós de armazenamento")
+        
+        if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
+            logger.debug(f"Configuração detalhada do Proposer {node_id}:")
+            logger.debug(f"- Acceptors: {self.acceptors}")
+            logger.debug(f"- Learners: {self.learners}")
+            logger.debug(f"- Stores: {self.stores}")
+            logger.debug(f"- proposal_counter inicial: {self.proposal_counter}")
+            logger.debug(f"- last_instance_id inicial: {self.last_instance_id}")
     
     async def start(self):
         """Inicia o processador de propostas em background."""
@@ -90,6 +101,7 @@ class Proposer:
         """Para o processador de propostas."""
         if self.executor_task and not self.executor_task.done():
             self.state = "stopping"
+            logger.info(f"Parando processador de propostas...")
             self.executor_task.cancel()
             try:
                 await self.executor_task
@@ -98,8 +110,14 @@ class Proposer:
         self.state = "stopped"
         logger.info(f"Processador de propostas parado")
     
-    def set_leader(self, is_leader: bool):
+    async def set_leader(self, is_leader: bool):
         """Define se este proposer é o líder."""
+        # Atualiza o status apenas se for diferente do atual
+        if self.is_leader != is_leader:
+            old_status = "líder" if self.is_leader else "seguidor"
+            new_status = "líder" if is_leader else "seguidor"
+            logger.important(f"Status do nó {self.node_id} alterado: {old_status} -> {new_status}")
+            
         self.is_leader = is_leader
         logger.info(f"Status de líder alterado para: {is_leader}")
     
@@ -110,6 +128,14 @@ class Proposer:
         Args:
             client_request: Requisição do cliente
         """
+        # Verifica se a requisição contém os campos necessários
+        required_fields = ["clientId", "timestamp", "operation", "resource"]
+        missing_fields = [field for field in required_fields if field not in client_request]
+        
+        if missing_fields:
+            logger.error(f"Requisição de cliente rejeitada: campos obrigatórios ausentes: {missing_fields}")
+            return {"status": "rejected", "reason": f"Missing required fields: {missing_fields}"}
+        
         # Gera um ID de instância único para esta proposta utilizando lock
         async with self.instance_id_lock:
             instance_id = self.last_instance_id + 1
@@ -121,7 +147,7 @@ class Proposer:
             "clientRequest": client_request,
             "status": "pending",
             "created_at": time.time(),
-            "attempt": 0
+            "attempt": 0  # Inicializa contador de tentativas
         }
         
         # Armazena a proposta no cache
@@ -130,8 +156,14 @@ class Proposer:
         # Adiciona à fila de processamento
         await self.pending_queue.put(instance_id)
         
-        logger.info(f"Proposta do cliente {client_request['clientId']} adicionada à fila "
+        client_id = client_request.get("clientId", "unknown")
+        logger.info(f"Proposta do cliente {client_id} adicionada à fila "
                     f"com instanceId {instance_id}")
+        
+        if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
+            logger.debug(f"Detalhes da proposta {instance_id}: {client_request}")
+        
+        return {"status": "accepted", "instanceId": instance_id}
     
     async def _proposal_executor(self):
         """Loop de processamento de propostas pendentes."""
@@ -150,6 +182,10 @@ class Proposer:
                 
                 logger.info(f"Processando proposta {instance_id}")
                 proposal["status"] = "processing"
+                
+                # Garante que o campo "attempt" existe
+                if "attempt" not in proposal:
+                    proposal["attempt"] = 0
                 
                 # Se somos o líder, podemos pular a fase Prepare (otimização do Multi-Paxos)
                 if self.is_leader and instance_id > 1:  # Pula fase Prepare para instâncias após a primeira
@@ -221,6 +257,15 @@ class Proposer:
         Returns:
             bool: True se o consenso foi alcançado, False caso contrário
         """
+        # Verifica se a proposta existe (segurança extra)
+        if not proposal:
+            logger.error(f"Tentativa de executar Paxos com proposta inexistente: {instance_id}")
+            return False
+            
+        # Garante que o campo "attempt" existe
+        if "attempt" not in proposal:
+            proposal["attempt"] = 0
+            
         # Tenta até 3 vezes com números de proposta diferentes
         for attempt in range(3):
             try:
@@ -235,7 +280,7 @@ class Proposer:
                 # Fase Prepare
                 prepare_result = await self._run_prepare_phase(instance_id, proposal_number, proposal)
                 
-                if not prepare_result["success"]:
+                if not prepare_result.get("success", False):
                     logger.warning(f"Fase Prepare falhou para instância {instance_id}, tentativa {attempt+1}")
                     await asyncio.sleep(0.5 * (attempt + 1))  # Backoff exponencial simples
                     continue
@@ -258,15 +303,8 @@ class Proposer:
         
         # Após 3 tentativas sem sucesso
         proposal["attempt"] += 1
+        logger.warning(f"Paxos falhou após 3 tentativas para instância {instance_id}")
         
-        # Se ainda não excedeu o limite de tentativas, coloca de volta na fila
-        if proposal["attempt"] < 3:
-            logger.info(f"Programando nova tentativa para proposta {instance_id} (tentativa {proposal['attempt']+1}/3)")
-            await asyncio.sleep(2 ** proposal["attempt"])  # Backoff exponencial entre tentativas
-            await self.pending_queue.put(instance_id)
-            return False
-        
-        logger.error(f"Proposta {instance_id} falhou após todas as tentativas")
         return False
     
     async def _run_prepare_phase(self, instance_id: int, proposal_number: int, 
@@ -290,16 +328,22 @@ class Proposer:
         """
         logger.info(f"Iniciando fase Prepare para instância {instance_id} com número {proposal_number}")
         
+        # Verifica se temos acceptors configurados
+        if not self.acceptors:
+            logger.error("Nenhum acceptor configurado para fase Prepare")
+            return {"success": False, "promises": 0, "highest_proposal": -1, "highest_value": None}
+        
         # Prepara mensagem para enviar aos acceptors
+        client_request = proposal.get("clientRequest", {})
         prepare_message = {
             "type": "PREPARE",
             "proposalNumber": proposal_number,
             "instanceId": instance_id,
             "proposerId": self.node_id,
-            "clientRequest": proposal["clientRequest"]
+            "clientRequest": client_request
         }
         
-        if DEBUG:
+        if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
             logger.debug(f"Prepare message: {prepare_message}")
         
         # Envia para todos os acceptors em paralelo
@@ -322,7 +366,7 @@ class Proposer:
                     highest_accepted_value = response["acceptedValue"]
         
         # Verifica se obteve maioria (3 de 5)
-        success = len(promises) >= 3
+        success = len(promises) >= (len(self.acceptors) // 2 + 1)
         
         if success:
             logger.info(f"Fase Prepare bem-sucedida: {len(promises)}/{len(self.acceptors)} promises recebidas")
@@ -351,13 +395,20 @@ class Proposer:
         Returns:
             bool: True se maioria aceitou, False caso contrário
         """
+        # Verifica se temos acceptors configurados
+        if not self.acceptors:
+            logger.error("Nenhum acceptor configurado para fase Accept")
+            return False
+            
         # Se não foi fornecido proposal_number, gera um novo
         if proposal_number is None:
-            self.proposal_counter += 1
-            proposal_number = (self.proposal_counter << 8) | self.node_id
+            async with self.proposal_counter_lock:
+                self.proposal_counter += 1
+                proposal_number = (self.proposal_counter << 8) | self.node_id
         
-        # Determina o valor a propor
-        value = value_override if value_override is not None else proposal["clientRequest"]
+        # Determina o valor a propor - garante que client_request existe
+        client_request = proposal.get("clientRequest", {})
+        value = value_override if value_override is not None else client_request
         
         logger.info(f"Iniciando fase Accept para instância {instance_id} com número {proposal_number}")
         
@@ -370,7 +421,7 @@ class Proposer:
             "value": value
         }
         
-        if DEBUG:
+        if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
             logger.debug(f"Accept message: {accept_message}")
         
         # Envia para todos os acceptors em paralelo
@@ -379,8 +430,8 @@ class Proposer:
         # Conta quantos aceitaram
         accepted_count = sum(1 for resp in responses if resp and resp.get("accepted") == True)
         
-        # Verifica se obteve maioria (3 de 5)
-        success = accepted_count >= 3
+        # Verifica se obteve maioria (mais da metade)
+        success = accepted_count >= (len(self.acceptors) // 2 + 1)
         
         if success:
             logger.info(f"Fase Accept bem-sucedida: {accepted_count}/{len(self.acceptors)} aceitaram")
@@ -403,6 +454,9 @@ class Proposer:
         # Cria tasks para todas as requisições em paralelo
         tasks = []
         for acceptor in self.acceptors:
+            if not acceptor:  # Ignora acceptors com endereço vazio
+                continue
+                
             url = f"http://{acceptor}{endpoint}"
             cb = self.circuit_breakers[acceptor]
             
@@ -410,10 +464,22 @@ class Proposer:
             tasks.append(self._send_with_retry(url, payload, circuit_breaker=cb))
         
         # Executa todas as requisições em paralelo
-        return await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Converte exceções para None
+        processed_results = []
+        for res in results:
+            if isinstance(res, Exception):
+                processed_results.append(None)
+                if DEBUG:
+                    logger.debug(f"Exception ao enviar para acceptor: {str(res)}")
+            else:
+                processed_results.append(res)
+        
+        return processed_results
     
     async def _send_with_retry(self, url: str, payload: Dict[str, Any], 
-                             circuit_breaker: CircuitBreaker,
+                             circuit_breaker: Optional[CircuitBreaker] = None,
                              max_retries: int = 3) -> Optional[Dict[str, Any]]:
         """
         Envia requisição HTTP com retentativas e circuit breaker.
@@ -427,8 +493,13 @@ class Proposer:
         Returns:
             Optional[Dict[str, Any]]: Resposta ou None em caso de falha
         """
+        # Validação de entrada
+        if not url:
+            logger.warning("Tentativa de enviar requisição para URL vazia")
+            return None
+            
         # Verifica se o circuit breaker está aberto
-        if not circuit_breaker.allow_request():
+        if circuit_breaker and not circuit_breaker.allow_request():
             logger.warning(f"Circuit breaker aberto para {url}, ignorando requisição")
             return None
         
@@ -444,16 +515,18 @@ class Proposer:
                 elapsed = time.time() - start_time
                 
                 # Registra sucesso no circuit breaker
-                await circuit_breaker.record_success()
+                if circuit_breaker:
+                    await circuit_breaker.record_success()
                 
-                if DEBUG:
+                if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
                     logger.debug(f"Requisição para {url} concluída em {elapsed:.3f}s")
                 
                 return response
                 
             except Exception as e:
                 # Registra falha no circuit breaker
-                await circuit_breaker.record_failure()
+                if circuit_breaker:
+                    await circuit_breaker.record_failure()
                 
                 logger.warning(f"Falha ao chamar {url}, tentativa {attempt+1}/{max_retries}: {e}")
                 
@@ -515,7 +588,14 @@ class Proposer:
             proposal: Dados da proposta
             status: Status da operação (COMMITTED/NOT_COMMITTED)
         """
-        client_id = proposal["clientRequest"].get("clientId", "unknown")
+        # Extrair clientId de forma segura
+        client_request = proposal.get("clientRequest", {})
+        client_id = client_request.get("clientId", "unknown")
+        
+        # Verifica se temos learners configurados
+        if not self.learners:
+            logger.error(f"Nenhum learner configurado para notificar cliente {client_id}")
+            return
         
         # Determina qual learner deve notificar este cliente
         # Usa hash do clientId para distribuição consistente
@@ -530,12 +610,16 @@ class Proposer:
             "clientId": client_id,
             "status": status,
             "timestamp": current_timestamp(),
-            "resource": proposal["clientRequest"].get("resource")
+            "resource": client_request.get("resource", "unknown")
         }
         
         try:
             url = f"http://{learner}/notify-client"
-            await self.http_client.post(url, json=notification, timeout=1.0)
+            response = await self.http_client.post(url, json=notification, timeout=1.0)
+            
+            if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
+                logger.debug(f"Resposta da notificação ao cliente: {response}")
+                
         except Exception as e:
             logger.error(f"Erro ao notificar cliente via learner: {e}")
     
@@ -548,7 +632,14 @@ class Proposer:
             proposal: Dados da proposta
             selected_store: Nó do Cluster Store selecionado
         """
-        client_id = proposal["clientRequest"].get("clientId", "unknown")
+        # Extrair dados da proposta de forma segura
+        client_request = proposal.get("clientRequest", {})
+        client_id = client_request.get("clientId", "unknown")
+        
+        # Verifica se temos learners configurados
+        if not self.learners:
+            logger.error(f"Nenhum learner configurado para acessar o Cluster Store")
+            return
         
         # Determina qual learner deve processar esta operação
         # Usa hash do instanceId para distribuição equilibrada
@@ -561,9 +652,9 @@ class Proposer:
             "type": "CLUSTER_ACCESS",
             "instanceId": instance_id,
             "clientId": client_id,
-            "operation": proposal["clientRequest"].get("operation", "WRITE"),
-            "resource": proposal["clientRequest"].get("resource"),
-            "data": proposal["clientRequest"].get("data"),
+            "operation": client_request.get("operation", "WRITE"),
+            "resource": client_request.get("resource", "R"),
+            "data": client_request.get("data", ""),
             "timestamp": current_timestamp(),
             "selectedStore": selected_store
         }
@@ -573,11 +664,12 @@ class Proposer:
             response = await self.http_client.post(url, json=access_request, timeout=2.0)
             
             # Verifica resultado
-            if response.get("status") == "success":
+            if response and response.get("status") == "success":
                 logger.info(f"Acesso ao Cluster Store bem-sucedido via learner {learner}")
                 return True
             else:
-                logger.warning(f"Acesso ao Cluster Store falhou: {response.get('message', 'Sem detalhes')}")
+                message = response.get("message", "Sem detalhes") if response else "Sem resposta"
+                logger.warning(f"Acesso ao Cluster Store falhou: {message}")
                 return False
         except Exception as e:
             logger.error(f"Erro ao delegar acesso ao Cluster Store para learner: {e}")
@@ -594,10 +686,13 @@ class Proposer:
         to_remove = []
         
         for instance_id, proposal in self.proposals.items():
-            age = now - proposal.get("created_at", now)
+            # Extrai created_at de forma segura
+            created_at = proposal.get("created_at", now)
+            age = now - created_at
             if age > max_age:
                 to_remove.append(instance_id)
         
+        # Remove as propostas antigas
         for instance_id in to_remove:
             del self.proposals[instance_id]
         

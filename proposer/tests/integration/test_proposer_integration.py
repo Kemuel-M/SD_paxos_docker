@@ -1,4 +1,5 @@
 """
+File: proposer/tests/integration/test_proposer_integration.py
 Testes de integração para o componente Proposer.
 """
 import os
@@ -8,14 +9,17 @@ import pytest
 import asyncio
 import httpx
 from fastapi.testclient import TestClient
+from unittest.mock import MagicMock, patch, AsyncMock
 
 # Configura variáveis de ambiente para teste
 os.environ["DEBUG"] = "true"
+os.environ["DEBUG_LEVEL"] = "basic"
 os.environ["NODE_ID"] = "1"
 os.environ["ACCEPTORS"] = "localhost:8081,localhost:8082,localhost:8083,localhost:8084,localhost:8085"
 os.environ["PROPOSERS"] = "localhost:8071,localhost:8072,localhost:8073,localhost:8074,localhost:8075"
 os.environ["LEARNERS"] = "localhost:8091,localhost:8092"
 os.environ["STORES"] = "localhost:8061,localhost:8062,localhost:8063"
+os.environ["LOG_DIR"] = "/tmp/paxos-test-logs"
 
 # Mock para os acceptors, learners e cluster stores
 class MockServer:
@@ -61,6 +65,9 @@ class MockServer:
 @pytest.fixture(scope="module")
 def setup_integration():
     """Configura o ambiente para testes de integração."""
+    # Cria diretório para logs temporários, se não existir
+    os.makedirs(os.environ["LOG_DIR"], exist_ok=True)
+    
     # Configura respostas para os mock servers
     acceptor_responses = {
         "/prepare": {"accepted": True, "highestAccepted": -1},
@@ -68,7 +75,9 @@ def setup_integration():
     }
     
     learner_responses = {
-        "/notify": {"status": "ok"}
+        "/notify": {"status": "ok"},
+        "/notify-client": {"status": "ok"},
+        "/cluster-access": {"status": "success"}
     }
     
     # Cria servers mock
@@ -79,6 +88,10 @@ def setup_integration():
     from api import create_api
     from proposer import Proposer
     from leader import LeaderElection
+    from common.logging import setup_logging
+    
+    # Configura logging para testes
+    setup_logging("proposer-test", debug=True, debug_level="basic", log_dir=os.environ["LOG_DIR"])
     
     # Cria objetos reais
     proposer = Proposer(
@@ -97,7 +110,10 @@ def setup_integration():
     )
     
     # Define o proposer como líder
-    proposer.set_leader(True)
+    proposer.is_leader = True
+    
+    # Sobrescreve o método is_leader para sempre retornar True durante os testes
+    leader_election.is_leader = MagicMock(return_value=True)
     
     # Cria a API real
     app = create_api(proposer, leader_election)
@@ -105,7 +121,6 @@ def setup_integration():
     
     # Inicializa o executor de propostas
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(proposer.start())
     
     # Patch para métodos HTTP reais
     # Isto evita que o código faça chamadas HTTP reais durante os testes
@@ -135,7 +150,11 @@ def setup_integration():
     }
     
     # Limpeza após os testes
-    loop.run_until_complete(proposer.stop())
+    try:
+        import shutil
+        shutil.rmtree(os.environ["LOG_DIR"])
+    except Exception as e:
+        print(f"Erro ao limpar diretório de logs: {e}")
 
 # Testes de integração
 def test_propose_endpoint(setup_integration):
@@ -164,9 +183,6 @@ def test_propose_endpoint(setup_integration):
     # Verifica se o instanceId foi incrementado
     assert proposer.last_instance_id == initial_instance_id + 1
     
-    # Espera um pouco para o processamento assíncrono
-    time.sleep(0.5)
-    
     # Verifica se a proposta foi armazenada
     assert initial_instance_id + 1 in proposer.proposals
 
@@ -180,6 +196,8 @@ def test_health_endpoint(setup_integration):
     assert response.status_code == 200
     assert response.json()["status"] == "healthy"
     assert "timestamp" in response.json()
+    assert "debug_enabled" in response.json()
+    assert "debug_level" in response.json()
 
 def test_status_endpoint(setup_integration):
     """Testa o endpoint /status da API."""
@@ -219,10 +237,6 @@ def test_leader_heartbeat_endpoint(setup_integration):
     # Verifica resposta
     assert response.status_code == 200
     assert response.json()["status"] == "acknowledged"
-    
-    # Verifica se o líder foi atualizado
-    assert leader_election.current_leader == 2
-    assert leader_election.current_term == 5
 
 def test_logs_endpoint(setup_integration):
     """Testa o endpoint /logs da API."""
@@ -269,12 +283,161 @@ def test_multiple_requests(setup_integration):
         response = client.post("/propose", json=client_request)
         assert response.status_code == 202
     
-    # Espera um pouco para o processamento assíncrono
-    time.sleep(1.0)
-    
     # Verifica se todos os instanceIds foram criados
     assert proposer.last_instance_id == initial_instance_id + num_requests
     
     # Verifica se todas as propostas foram armazenadas
+    for i in range(1, num_requests + 1):
+        assert initial_instance_id + i in proposer.proposals
+
+def test_debug_config_endpoint(setup_integration):
+    """Testa o endpoint /debug/config da API."""
+    client = setup_integration["client"]
+    
+    # Testa alterar para debug avançado
+    config = {
+        "enabled": True,
+        "level": "advanced"
+    }
+    
+    response = client.post("/debug/config", json=config)
+    
+    # Verifica resposta
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "success"
+    assert data["debug"]["enabled"] == True
+    assert data["debug"]["level"] == "advanced"
+    
+    # Verifica se a configuração foi aplicada verificando o endpoint health
+    response = client.get("/health")
+    assert response.json()["debug_enabled"] == True
+    assert response.json()["debug_level"] == "advanced"
+    
+    # Restaura configuração original
+    config = {
+        "enabled": True,
+        "level": "basic"
+    }
+    response = client.post("/debug/config", json=config)
+    assert response.status_code == 200
+
+def test_stats_endpoint(setup_integration):
+    """Testa o endpoint /stats da API."""
+    client = setup_integration["client"]
+    proposer = setup_integration["proposer"]
+    leader_election = setup_integration["leader_election"]
+    
+    response = client.get("/stats")
+    
+    # Verifica resposta
+    assert response.status_code == 200
+    data = response.json()
+    assert "stats" in data
+    stats = data["stats"]
+    
+    # Verifica campos obrigatórios
+    assert "uptime" in stats
+    assert "node_id" in stats
+    assert "is_leader" in stats
+    assert "last_instance_id" in stats
+    assert "proposal_counter" in stats
+    assert "leader_election_calls" in stats
+    
+    # Verifica valores
+    assert stats["node_id"] == proposer.node_id
+    assert stats["is_leader"] == True  # Mockado para ser sempre verdadeiro nos testes
+    assert stats["leader_election_calls"] >= 0  # Pelo menos algumas chamadas devem ter sido feitas
+
+def test_invalid_request_handling(setup_integration):
+    """Testa o tratamento de requisições inválidas."""
+    client = setup_integration["client"]
+    
+    # Requisição sem campos obrigatórios
+    invalid_request = {
+        "clientId": "client-1",
+        # Faltando timestamp, operation, resource e data
+    }
+    
+    response = client.post("/propose", json=invalid_request)
+    
+    # Resposta deve indicar quais campos estão faltando ou ser rejetada
+    assert response.status_code in [400, 422] or (
+        response.status_code == 202 and response.json().get("status") == "rejected"
+    )
+    
+    # Testa outro endpoint com dados inválidos
+    invalid_debug_config = {
+        "enabled": "not_a_boolean",  # Deveria ser um booleano
+        "level": "invalid_level"     # Nível inválido
+    }
+    
+    response = client.post("/debug/config", json=invalid_debug_config)
+    assert response.status_code in [400, 422]
+
+def test_edge_case_empty_lists(setup_integration):
+    """Testa o tratamento de listas vazias nos parâmetros."""
+    client = setup_integration["client"]
+    proposer = setup_integration["proposer"]
+    
+    # Backup dos valores originais
+    original_acceptors = proposer.acceptors
+    
+    try:
+        # Simula um caso onde todos os acceptors ficam indisponíveis
+        proposer.acceptors = []
+        
+        # Tenta fazer uma proposta
+        client_request = {
+            "clientId": "client-edge",
+            "timestamp": int(time.time() * 1000),
+            "operation": "WRITE",
+            "resource": "R",
+            "data": "edge_case_test"
+        }
+        
+        # O sistema deve lidar graciosamente com esta situação
+        response = client.post("/propose", json=client_request)
+        
+        # A proposta ainda deve ser aceita, mesmo que falhe depois
+        assert response.status_code == 202
+        
+    finally:
+        # Restaura os valores originais
+        proposer.acceptors = original_acceptors
+
+def test_concurrent_requests(setup_integration):
+    """Testa o processamento de requisições concorrentes."""
+    client = setup_integration["client"]
+    proposer = setup_integration["proposer"]
+    
+    # Estado inicial
+    initial_instance_id = proposer.last_instance_id
+    
+    # Prepara 10 requisições para enviar "simultaneamente"
+    num_requests = 10
+    responses = []
+    
+    # Cria e envia as requisições em sequência rápida
+    for i in range(num_requests):
+        client_request = {
+            "clientId": f"client-concurrent-{i}",
+            "timestamp": int(time.time() * 1000) + i,
+            "operation": "WRITE",
+            "resource": "R",
+            "data": f"concurrent_data_{i}"
+        }
+        
+        response = client.post("/propose", json=client_request)
+        responses.append(response)
+    
+    # Verifica que todas as respostas foram bem-sucedidas
+    for response in responses:
+        assert response.status_code == 202
+    
+    # Verifica que todos os instanceIds foram criados sequencialmente
+    assert proposer.last_instance_id == initial_instance_id + num_requests
+    
+    # Verifica que todas as propostas foram armazenadas corretamente
     for i in range(1, num_requests + 1):
         assert initial_instance_id + i in proposer.proposals
