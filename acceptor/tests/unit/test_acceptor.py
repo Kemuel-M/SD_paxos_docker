@@ -20,10 +20,9 @@ from acceptor import Acceptor
 
 @pytest.fixture
 def mock_persistence():
-    """Fixture that creates a mock persistence manager."""
     persistence = MagicMock()
     
-    # Configure load_state as a synchronous method
+    # Configure load_state como método síncrono
     persistence.load_state.return_value = {
         "promises": {},
         "accepted": {},
@@ -33,8 +32,10 @@ def mock_persistence():
         "proposals_accepted": 0
     }
     
-    # Configure save_state as an asynchronous method
-    persistence.save_state = AsyncMock()
+    # Configure save_state para retornar uma future já completada
+    future = asyncio.Future()
+    future.set_result(None)
+    persistence.save_state = MagicMock(return_value=future)
     return persistence
 
 @pytest.fixture
