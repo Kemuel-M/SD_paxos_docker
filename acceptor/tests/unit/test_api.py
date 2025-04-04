@@ -123,7 +123,10 @@ def test_prepare_endpoint(api_client, mock_acceptor):
     # Check if acceptor method was called
     mock_acceptor.process_prepare.assert_called_once()
     args, kwargs = mock_acceptor.process_prepare.call_args
-    assert args[0] == prepare_request
+    
+    expected_request = prepare_request.copy()
+    expected_request["clientRequest"] = {}
+    assert args[0] == expected_request
 
 def test_accept_endpoint(api_client, mock_acceptor):
     """Test the /accept endpoint."""

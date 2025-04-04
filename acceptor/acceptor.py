@@ -273,6 +273,7 @@ class Acceptor:
             if proposal_number >= highest_promised:
                 # Update accepted value
                 self.accepted[instance_id] = (proposal_number, value)
+                self.promises[instance_id] = proposal_number
                 self.proposals_accepted += 1
                 
                 logger.info(f"Proposal accepted for instance {instance_id} with proposal number {proposal_number}")

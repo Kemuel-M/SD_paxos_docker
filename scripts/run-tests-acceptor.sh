@@ -138,17 +138,17 @@ run_unit_tests() {
     if [ "$GENERATE_COVERAGE" = true ]; then
         # Executa com cobertura
         if [ "$VERBOSE" = true ]; then
-            PYTHONPATH=. pytest -xvs tests/unit --cov=. --cov-report=term --cov-report=html:../$COVERAGE_DIR/unit
+            PYTHONPATH=.:.. pytest -xvs tests/unit --cov=. --cov-report=term --cov-report=html:../$COVERAGE_DIR/unit
         else
-            PYTHONPATH=. pytest -xvs tests/unit --cov=. --cov-report=html:../$COVERAGE_DIR/unit
+            PYTHONPATH=.:.. pytest -xvs tests/unit --cov=. --cov-report=html:../$COVERAGE_DIR/unit
         fi
         UNIT_RESULT=$?
     else
         # Executa sem cobertura
         if [ "$VERBOSE" = true ]; then
-            PYTHONPATH=. pytest -xvs tests/unit
+            PYTHONPATH=.:.. pytest -xvs tests/unit
         else
-            PYTHONPATH=. pytest -xs tests/unit
+            PYTHONPATH=.:.. pytest -xs tests/unit
         fi
         UNIT_RESULT=$?
     fi
@@ -174,17 +174,17 @@ run_integration_tests() {
     if [ "$GENERATE_COVERAGE" = true ]; then
         # Executa com cobertura
         if [ "$VERBOSE" = true ]; then
-            PYTHONPATH=. pytest -xvs tests/integration --cov=. --cov-report=term --cov-report=html:../$COVERAGE_DIR/integration
+            PYTHONPATH=.:.. pytest -xvs tests/integration --cov=. --cov-report=term --cov-report=html:../$COVERAGE_DIR/integration
         else
-            PYTHONPATH=. pytest -xvs tests/integration --cov=. --cov-report=html:../$COVERAGE_DIR/integration
+            PYTHONPATH=.:.. pytest -xvs tests/integration --cov=. --cov-report=html:../$COVERAGE_DIR/integration
         fi
         INTEGRATION_RESULT=$?
     else
         # Executa sem cobertura
         if [ "$VERBOSE" = true ]; then
-            PYTHONPATH=. pytest -xvs tests/integration
+            PYTHONPATH=.:.. pytest -xvs tests/integration
         else
-            PYTHONPATH=. pytest -xs tests/integration
+            PYTHONPATH=.:.. pytest -xs tests/integration
         fi
         INTEGRATION_RESULT=$?
     fi
@@ -212,7 +212,7 @@ generate_combined_coverage() {
         cd $ACCEPTOR_DIR
         
         # Gera relatório combinado
-        PYTHONPATH=. pytest -xvs --cov=. --cov-report=html:../$COVERAGE_DIR/combined
+        PYTHONPATH=.:.. pytest -xvs --cov=. --cov-report=html:../$COVERAGE_DIR/combined
         
         cd ..
         
