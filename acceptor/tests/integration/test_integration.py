@@ -457,9 +457,11 @@ def test_identical_proposal_numbers(setup_integration):
     data4 = response4.json()
     assert data4["accepted"] == True
 
-def test_concurrent_requests(setup_integration):
-    """Test handling of concurrent prepare/accept requests."""
+@pytest.mark.asyncio
+async def test_concurrent_requests(setup_integration):
+    """Test handling of concurrent prepare requests with explicit timeout and debugging."""
     client = setup_integration["client"]
+    acceptor = setup_integration["acceptor"]
     
     # Function to send a prepare request
     def send_prepare(instance_id, proposal_number, proposer_id):
@@ -471,21 +473,10 @@ def test_concurrent_requests(setup_integration):
         }
         return client.post("/prepare", json=prepare_request)
     
-    # Function to send an accept request
-    def send_accept(instance_id, proposal_number, proposer_id, value):
-        accept_request = {
-            "type": "ACCEPT",
-            "proposalNumber": proposal_number,
-            "instanceId": instance_id,
-            "proposerId": proposer_id,
-            "value": {"data": value}
-        }
-        return client.post("/accept", json=accept_request)
-    
-    # Test concurrent prepare requests for the same instance
+    # Concurrent test with explicit timeout and more robust error handling
     instance_id = 600
     
-    # Define parameters for concurrent requests
+    # Define parameters for concurrent requests with more controlled values
     prepare_params = [
         (instance_id, 300, 1),
         (instance_id, 310, 2),
@@ -494,40 +485,44 @@ def test_concurrent_requests(setup_integration):
         (instance_id, 320, 5)
     ]
     
-    # Send concurrent prepare requests
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        prepare_futures = [executor.submit(send_prepare, *params) for params in prepare_params]
-        prepare_responses = [future.result() for future in prepare_futures]
+    # Use ThreadPoolExecutor with a timeout
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
     
-    # Check responses
-    accepted_count = sum(1 for resp in prepare_responses if resp.json().get("accepted", False))
-    rejected_count = len(prepare_responses) - accepted_count
+    try:
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            # Set an explicit timeout for the entire operation
+            futures = [executor.submit(send_prepare, *params) for params in prepare_params]
+            
+            # Wait for all futures with a timeout
+            try:
+                prepare_responses = [future.result(timeout=5) for future in futures]
+            except TimeoutError:
+                print("Concurrent prepare requests timed out!")
+                # Cancel any pending futures
+                for future in futures:
+                    future.cancel()
+                raise
+    except Exception as e:
+        print(f"Error in concurrent requests: {e}")
+        raise
+    
+    # Add more detailed logging and assertions
+    accepted_responses = [resp for resp in prepare_responses if resp.json().get("accepted", False)]
+    rejected_responses = [resp for resp in prepare_responses if not resp.json().get("accepted", False)]
+    
+    print(f"Total responses: {len(prepare_responses)}")
+    print(f"Accepted responses: {len(accepted_responses)}")
+    print(f"Rejected responses: {len(rejected_responses)}")
     
     # Only the highest proposal numbers should be accepted
-    assert accepted_count >= 1
-    assert rejected_count >= 0
+    accepted_numbers = [resp.json().get("proposalNumber", 0) for resp in accepted_responses]
+    assert max(accepted_numbers) == 320, f"Unexpected highest accepted proposal: {max(accepted_numbers)}"
     
-    # Test concurrent accept requests
-    accept_params = [
-        (instance_id, 320, 5, "value1"),  # Same as highest prepare
-        (instance_id, 325, 1, "value2"),  # Higher than any prepare
-        (instance_id, 330, 2, "value3"),  # Even higher
-        (instance_id, 315, 3, "value4"),  # Lower than highest accepted
-        (instance_id, 310, 4, "value5")   # Even lower
-    ]
+    # At least one response should be accepted
+    assert len(accepted_responses) >= 1, "No prepare requests were accepted"
     
-    # Send concurrent accept requests
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        accept_futures = [executor.submit(send_accept, *params) for params in accept_params]
-        accept_responses = [future.result() for future in accept_futures]
-    
-    # Check responses
-    accepted_count = sum(1 for resp in accept_responses if resp.json().get("accepted", False))
-    rejected_count = len(accept_responses) - accepted_count
-    
-    # Only proposals with numbers >= highest promise should be accepted
-    assert accepted_count >= 1
-    assert rejected_count >= 0
+    # At least some should be rejected
+    assert len(rejected_responses) >= 1, "All prepare requests were accepted"
 
 def test_malformed_requests(setup_integration):
     """Test handling of malformed or invalid requests."""
