@@ -120,55 +120,70 @@ class Acceptor:
             
         self.running = False
 
-        # Cancel all pending tasks
-        for task in self._pending_tasks:
-            if not task.done():
-                task.cancel()
-                
-        # Wait for tasks to complete cancellation
+        # Cancela tarefas pendentes com timeout
         if self._pending_tasks:
-            await asyncio.gather(*self._pending_tasks, return_exceptions=True)
-            self._pending_tasks.clear()
+            for task in self._pending_tasks:
+                if not task.done():
+                    task.cancel()
+                    
+            try:
+                # Aguarda cancelamento com timeout
+                await asyncio.wait_for(
+                    asyncio.gather(*self._pending_tasks, return_exceptions=True),
+                    timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout aguardando cancelamento de {len(self._pending_tasks)} tarefas")
+            finally:
+                self._pending_tasks.clear()
         
-        # Persist state before stopping
+        # Persistência final com timeout
         if self.persistence:
-            await self.save_state()
-            
-        # Close HTTP client
-        await self.http_client.close()
+            try:
+                await asyncio.wait_for(self.save_state(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout durante persistência final")
         
+        await self.http_client.close()
         logger.info(f"Acceptor {self.node_id} stopped")
     
-    async def save_state(self):
-        """Save acceptor state to persistence asynchronously."""
+    async def save_state(self, timeout_seconds=5.0):
+        """Save acceptor state to persistence asynchronously with timeout."""
         if not self.persistence:
             return
         
-        # Uso de lock específico para persistência
-        async with self.persistence_lock:
-            # Captura estatísticas atomicamente
-            async with self.stats_lock:
-                prepare_requests = self.prepare_requests_processed
-                accept_requests = self.accept_requests_processed
-                promises_made = self.promises_made
-                proposals_accepted = self.proposals_accepted
-            
-            # Nota: A captura de promises e accepted não é perfeitamente atômica,
-            # mas é aceitável para persistência já que os locks por instância garantem
-            # integridade em cada instância individual
-            state = {
-                "promises": self.promises, 
-                "accepted": self.accepted,
-                "prepare_requests_processed": prepare_requests,
-                "accept_requests_processed": accept_requests,
-                "promises_made": promises_made,
-                "proposals_accepted": proposals_accepted
-            }
-            
-            await self.persistence.save_state(state)
-            
-            if DEBUG and DEBUG_LEVEL == "trace":
-                logger.debug(f"State saved to persistence: {len(self.promises)} promises, {len(self.accepted)} accepted values")
+        try:
+            # Use wait_for em vez de timeout contextual
+            async def _save_with_lock():
+                async with self.persistence_lock:
+                    # Captura estatísticas atomicamente
+                    async with self.stats_lock:
+                        prepare_requests = self.prepare_requests_processed
+                        accept_requests = self.accept_requests_processed
+                        promises_made = self.promises_made
+                        proposals_accepted = self.proposals_accepted
+                    
+                    state = {
+                        "promises": self.promises, 
+                        "accepted": self.accepted,
+                        "prepare_requests_processed": prepare_requests,
+                        "accept_requests_processed": accept_requests,
+                        "promises_made": promises_made,
+                        "proposals_accepted": proposals_accepted
+                    }
+                    
+                    await self.persistence.save_state(state)
+                    
+                    if DEBUG and DEBUG_LEVEL == "trace":
+                        logger.debug(f"State saved to persistence: {len(self.promises)} promises, {len(self.accepted)} accepted values")
+                    
+                    return True
+                    
+            await asyncio.wait_for(_save_with_lock(), timeout=timeout_seconds)
+            return True
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout durante operação save_state")
+            return False
     
     async def process_prepare(self, prepare_msg: Dict[str, Any]) -> Dict[str, Any]:
         """

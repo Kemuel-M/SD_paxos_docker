@@ -464,7 +464,7 @@ async def test_concurrent_requests(setup_integration):
     acceptor = setup_integration["acceptor"]
     
     # Função para enviar prepare request
-    def send_prepare(instance_id, proposal_number, proposer_id):
+    async def send_prepare(instance_id, proposal_number, proposer_id):
         prepare_request = {
             "type": "PREPARE",
             "proposalNumber": proposal_number,
@@ -483,28 +483,24 @@ async def test_concurrent_requests(setup_integration):
         (instance_id, 320, 5)
     ]
     
-    # Usa ThreadPoolExecutor para simular concorrência
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    import time
+    print("Sending prepare requests...")
     
-    # Adicionando um pequeno atraso entre as requisições para garantir mais concorrência
-    print("Sending prepare requests with slight delay...")
-    def delayed_send_prepare(params, delay=2):
-        time.sleep(delay)
-        return send_prepare(*params)
+    # Execute com pequenos atrasos aleatórios para garantir concorrência
+    async def delayed_send_prepare(params):
+        instance_id, proposal_number, proposer_id = params
+        await asyncio.sleep(0.1)  # Atraso muito menor
+        return await send_prepare(instance_id, proposal_number, proposer_id)
     
-    # Executa requisições concorrentes
-    print("Executing prepare requests...")
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = [executor.submit(delayed_send_prepare, params) for params in prepare_params]
-        
-        # Espera todas as requisições serem processadas
-        prepare_responses = list(future.result() for future in as_completed(futures))
+    # Cria tarefas para todas as requisições
+    tasks = [delayed_send_prepare(params) for params in prepare_params]
     
-    # Adiciona um pequeno tempo de espera para processamento assíncrono
-    time.sleep(3)
+    # Aguarda todas as tarefas com timeout
+    prepare_responses = await asyncio.gather(*tasks)
     
-    # Recupera o status da instância para verificar processamento completo
+    # Espera mais tempo para tarefas pendentes
+    await asyncio.sleep(5)
+    
+    # Verifica o status da instância
     print("Checking status of instance...")
     status_response = client.get(f"/instance/{instance_id}")
     status = status_response.json()
@@ -565,38 +561,57 @@ def test_full_api_integration(setup_integration):
     """Test all API endpoints together."""
     client = setup_integration["client"]
     
+    # Criar explicitamente a instância 200 para o teste
+    prepare_request = {
+        "type": "PREPARE",
+        "proposalNumber": 60,
+        "instanceId": 200,
+        "proposerId": 1
+    }
+    client.post("/prepare", json=prepare_request)
+    
+    # Aceitar a proposta para garantir que a instância está completamente criada
+    accept_request = {
+        "type": "ACCEPT",
+        "proposalNumber": 60,
+        "instanceId": 200,
+        "proposerId": 1,
+        "value": {"data": "test data for API integration"}
+    }
+    client.post("/accept", json=accept_request)
+
     # Test health endpoint
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "healthy"
-    
+
     # Test status endpoint
     response = client.get("/status")
     assert response.status_code == 200
     assert response.json()["node_id"] == 1
-    
+
     # Test instances endpoint
     response = client.get("/instances")
     assert response.status_code == 200
     assert "instances" in response.json()
-    
+
     # Test logs endpoint
     response = client.get("/logs")
     assert response.status_code == 200
     assert "logs" in response.json()
-    
+
     # Test stats endpoint
     response = client.get("/stats")
     assert response.status_code == 200
     assert "stats" in response.json()
-    
+
     # Test debug config endpoint
     debug_config = {"enabled": True, "level": "advanced"}
     response = client.post("/debug/config", json=debug_config)
     assert response.status_code == 200
     assert response.json()["debug"]["level"] == "advanced"
-    
-    # Test specific instance that was created in previous tests
+
+    # Test specific instance that was created in this test
     response = client.get("/instance/200")
     assert response.status_code == 200
     assert response.json()["instanceId"] == 200
