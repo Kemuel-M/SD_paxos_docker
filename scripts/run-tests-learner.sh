@@ -137,13 +137,17 @@ setup_environment() {
     export ACCEPTORS="localhost:8091,localhost:8092,localhost:8093,localhost:8094,localhost:8095"
     export STORES="localhost:8081,localhost:8082,localhost:8083"
     
+    # MODIFICAÇÃO: Usar strings em vez de valores booleanos
     if [ "$USE_CLUSTER_STORE" = true ]; then
-        export USE_CLUSTER_STORE=true
+        export USE_CLUSTER_STORE="true"
         echo -e "${GREEN}Testes configurados para usar Cluster Store (Parte 2)${NC}"
     else
-        export USE_CLUSTER_STORE=false
+        export USE_CLUSTER_STORE="false"
         echo -e "${GREEN}Testes configurados para simulação (Parte 1)${NC}"
     fi
+    
+    # Exibir a configuração para confirmar
+    echo -e "${YELLOW}Valor de USE_CLUSTER_STORE: $USE_CLUSTER_STORE${NC}"
     
     # Garante que PYTHONPATH inclua módulos necessários
     export PYTHONPATH=$PYTHONPATH:$(pwd):$(pwd)/learner:$(pwd)/common
@@ -192,25 +196,31 @@ run_unit_tests() {
 run_integration_tests() {
     echo -e "${YELLOW}====== Executando testes de integração ======${NC}"
     
+    # MODIFICAÇÃO: Exibir a configuração de USE_CLUSTER_STORE para debug
+    echo -e "${YELLOW}USE_CLUSTER_STORE=${USE_CLUSTER_STORE}${NC}"
+    
     cd $LEARNER_DIR
     
-    # Exibir a configuração de USE_CLUSTER_STORE para debug
-    echo -e "${YELLOW}USE_CLUSTER_STORE=${USE_CLUSTER_STORE}${NC}"
+    # MODIFICAÇÃO: Passar a variável como parâmetro do pytest para não depender da variável de ambiente
+    PYTEST_ARGS=""
+    if [ "$USE_CLUSTER_STORE" = "true" ]; then
+        PYTEST_ARGS="-o use_cluster_store=true"
+    fi
     
     if [ "$GENERATE_COVERAGE" = true ]; then
         # Executa com cobertura
         if [ "$VERBOSE" = true ]; then
-            PYTHONPATH=.:.. pytest -xvs tests/integration --cov=. --cov-report=term --cov-report=html:../$COVERAGE_DIR/integration
+            PYTHONPATH=.:.. pytest -xvs tests/integration $PYTEST_ARGS --cov=. --cov-report=term --cov-report=html:../$COVERAGE_DIR/integration
         else
-            PYTHONPATH=.:.. pytest -xvs tests/integration --cov=. --cov-report=html:../$COVERAGE_DIR/integration
+            PYTHONPATH=.:.. pytest -xvs tests/integration $PYTEST_ARGS --cov=. --cov-report=html:../$COVERAGE_DIR/integration
         fi
         INTEGRATION_RESULT=$?
     else
         # Executa sem cobertura
         if [ "$VERBOSE" = true ]; then
-            PYTHONPATH=.:.. pytest -xvs tests/integration
+            PYTHONPATH=.:.. pytest -xvs tests/integration $PYTEST_ARGS
         else
-            PYTHONPATH=.:.. pytest -xs tests/integration
+            PYTHONPATH=.:.. pytest -xs tests/integration $PYTEST_ARGS
         fi
         INTEGRATION_RESULT=$?
     fi

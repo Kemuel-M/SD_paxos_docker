@@ -24,15 +24,50 @@ os.environ["NODE_ID"] = "1"
 os.environ["ACCEPTORS"] = "localhost:8091,localhost:8092,localhost:8093,localhost:8094,localhost:8095"
 os.environ["STORES"] = "localhost:8081,localhost:8082,localhost:8083"
 os.environ["LOG_DIR"] = "/tmp/paxos-test-logs"
-os.environ["USE_CLUSTER_STORE"] = "false"  # Start with Part 1 simulation
+
+# Definir o valor padrão, que pode ser sobrescrito pelos parâmetros do pytest ou variável de ambiente
+DEFAULT_USE_CLUSTER_STORE = "false"
+
+# Função auxiliar para determinar se os testes devem usar Cluster Store
+def should_use_cluster_store():
+    """Determine if tests should use cluster store based on environment variable or pytest configuration."""
+    # Verificar se foi passado via parâmetro do comando pytest
+    if hasattr(pytest, "use_cluster_store"):
+        return pytest.use_cluster_store == "true"
+    
+    # Verificar variável de ambiente
+    return os.environ.get("USE_CLUSTER_STORE", DEFAULT_USE_CLUSTER_STORE) == "true"
 
 # Create directories
 os.makedirs(os.environ["LOG_DIR"], exist_ok=True)
+
+# Fixture para testes que devem ser executados com Cluster Store
+@pytest.fixture
+def require_cluster_store():
+    """
+    Fixture para pular testes que requerem Cluster Store se não estiver habilitado.
+    """
+    if not should_use_cluster_store():
+        # Configurar temporariamente o ambiente para usar cluster store apenas para este teste
+        original = os.environ.get("USE_CLUSTER_STORE", None)
+        os.environ["USE_CLUSTER_STORE"] = "true"
+        yield
+        # Restaurar a configuração original
+        if original is not None:
+            os.environ["USE_CLUSTER_STORE"] = original
+        else:
+            del os.environ["USE_CLUSTER_STORE"]
+    else:
+        yield
 
 # Fixture for setup and teardown of test environment
 @pytest.fixture(scope="module")
 def setup_integration():
     """Setup function executed once before all integration tests."""
+    # Verificar a configuração
+    use_cluster_store = should_use_cluster_store()
+    print(f"Running integration tests with USE_CLUSTER_STORE={use_cluster_store}")
+    
     # Create temporary data directory
     temp_dir = tempfile.mkdtemp()
     
@@ -61,14 +96,14 @@ def setup_integration():
         two_phase_manager = TwoPhaseCommitManager(node_id=1, stores=os.environ["STORES"].split(","))
         rowa_manager = RowaManager(node_id=1, stores=os.environ["STORES"].split(","), two_phase_manager=two_phase_manager)
         
-        # Create learner
+        # Create learner (usando o valor calculado para use_cluster_store)
         learner = Learner(
             node_id=1,
             acceptors=os.environ["ACCEPTORS"].split(","),
             stores=os.environ["STORES"].split(","),
             consensus_manager=consensus_manager,
             rowa_manager=rowa_manager,
-            use_cluster_store=(os.environ["USE_CLUSTER_STORE"].lower() in ("true", "1", "yes"))
+            use_cluster_store=use_cluster_store
         )
         
         # Create API
@@ -89,7 +124,8 @@ def setup_integration():
             "two_phase_manager": two_phase_manager,
             "client": client,
             "http_client_mock": http_client_mock,
-            "loop": loop  # Passar o loop para os testes
+            "loop": loop,  # Passar o loop para os testes
+            "use_cluster_store": use_cluster_store  # Para que os testes saibam a configuração
         }
         
         # Cleanup
@@ -299,19 +335,22 @@ def run_async(coroutine):
         finally:
             new_loop.close()
 
-# Versão modificada do teste
+# Versão modificada do teste - agora sempre executa independentemente da configuração
 def test_part1_simulation(setup_integration):
     """Test the Part 1 simulation mode (no Cluster Store)."""
     client = setup_integration["client"]
     learner = setup_integration["learner"]
     rowa_manager = setup_integration["rowa_manager"]
+    
+    # Salvar a configuração original
+    original_use_cluster_store = learner.use_cluster_store
+    
+    # Configurar temporariamente para modo de simulação
+    learner.use_cluster_store = False
 
     import logging
     logging.basicConfig(level=logging.DEBUG)
     logger = logging.getLogger(__name__)
-    
-    # Ensure we're in Part 1 mode
-    learner.use_cluster_store = False
     
     # Armazenar resultados em uma estrutura thread-safe
     # (já que estamos em um ambiente de teste que mistura código síncrono e assíncrono)
@@ -409,58 +448,68 @@ def test_part1_simulation(setup_integration):
             # Restaurar o método original
             rowa_manager.simulate_resource_access = original_simulate
     
-    # Executar o teste direto de forma síncrona
-    direct_results = run_async(direct_test())
-    
-    # Verificação
-    logger.debug(f"Resultados finais: {direct_results}")
-    assert len(direct_results) > 0, "Método de simulação não foi chamado ou não registrou resultados"
+    try:
+        # Executar o teste direto de forma síncrona
+        direct_results = run_async(direct_test())
+        
+        # Verificação
+        logger.debug(f"Resultados finais: {direct_results}")
+        assert len(direct_results) > 0, "Método de simulação não foi chamado ou não registrou resultados"
+    finally:
+        # Restaurar a configuração original
+        learner.use_cluster_store = original_use_cluster_store
 
-@pytest.mark.skipif(os.environ["USE_CLUSTER_STORE"] != "true", 
-                   reason="Requires USE_CLUSTER_STORE=true")
-def test_part2_cluster_store(setup_integration):
+# Usando a fixture require_cluster_store para forçar a disponibilidade deste teste
+def test_part2_cluster_store(setup_integration, require_cluster_store):
     """Test the Part 2 Cluster Store integration."""
     client = setup_integration["client"]
     learner = setup_integration["learner"]
     rowa_manager = setup_integration["rowa_manager"]
     http_client_mock = setup_integration["http_client_mock"]
     
-    # Ensure we're in Part 2 mode
+    # Salvar a configuração original
+    original_use_cluster_store = learner.use_cluster_store
+    
+    # Forçar ativação do Cluster Store para este teste
     learner.use_cluster_store = True
     
-    # Reset HTTP client mock
-    http_client_mock.post.reset_mock()
-    
-    # Configure HTTP client mock for prepare and commit success
-    http_client_mock.post.side_effect = [
-        # Prepare responses for 3 stores
-        {"ready": True, "currentVersion": 1},
-        {"ready": True, "currentVersion": 1},
-        {"ready": True, "currentVersion": 1},
-        # Commit responses for 3 stores
-        {"success": True, "version": 2},
-        {"success": True, "version": 2},
-        {"success": True, "version": 2}
-    ]
-    
-    # Create and send learn notifications to reach consensus
-    for acceptor_id in range(1, 4):
-        notification = {
-            "type": "LEARN",
-            "proposalNumber": 42,
-            "instanceId": 500,
-            "acceptorId": acceptor_id,
-            "accepted": True,
-            "value": {"clientId": "client-1", "data": "test", "resource": "R"},
-            "timestamp": int(time.time() * 1000)
-        }
-        client.post("/learn", json=notification)
-    
-    # Wait for processing to complete
-    time.sleep(0.5)
-    
-    # Check if HTTP client was called for both prepare and commit phases
-    assert http_client_mock.post.call_count >= 6  # 3 prepare + 3 commit
+    try:
+        # Reset HTTP client mock
+        http_client_mock.post.reset_mock()
+        
+        # Configure HTTP client mock for prepare and commit success
+        http_client_mock.post.side_effect = [
+            # Prepare responses for 3 stores
+            {"ready": True, "currentVersion": 1},
+            {"ready": True, "currentVersion": 1},
+            {"ready": True, "currentVersion": 1},
+            # Commit responses for 3 stores
+            {"success": True, "version": 2},
+            {"success": True, "version": 2},
+            {"success": True, "version": 2}
+        ]
+        
+        # Create and send learn notifications to reach consensus
+        for acceptor_id in range(1, 4):
+            notification = {
+                "type": "LEARN",
+                "proposalNumber": 42,
+                "instanceId": 500,
+                "acceptorId": acceptor_id,
+                "accepted": True,
+                "value": {"clientId": "client-1", "data": "test", "resource": "R"},
+                "timestamp": int(time.time() * 1000)
+            }
+            client.post("/learn", json=notification)
+        
+        # Wait for processing to complete
+        time.sleep(0.5)
+        
+        # Check if HTTP client was called for both prepare and commit phases
+        assert http_client_mock.post.call_count >= 6  # 3 prepare + 3 commit
+    finally:
+        # Restaurar a configuração original
+        learner.use_cluster_store = original_use_cluster_store
 
 def test_client_notification(setup_integration):
     """Test the client notification mechanism."""
@@ -512,64 +561,72 @@ def test_client_notification(setup_integration):
     # Restore original method
     learner._should_handle_client_notification = original_should_handle
 
-def test_client_notification_on_storage_failure(setup_integration):
+# Este teste agora usa a fixture require_cluster_store
+def test_client_notification_on_storage_failure(setup_integration, require_cluster_store):
     """Test client notification when Cluster Store write fails."""
     client = setup_integration["client"]
     learner = setup_integration["learner"]
     rowa_manager = setup_integration["rowa_manager"]
     http_client_mock = setup_integration["http_client_mock"]
     
-    # Ensure we're in Part 2 mode
+    # Salvar configuração original
+    original_use_cluster_store = learner.use_cluster_store
+    
+    # Forçar ativação do Cluster Store para este teste
     learner.use_cluster_store = True
     
-    # Reset HTTP client mock
-    http_client_mock.post.reset_mock()
-    
-    # Configure rowa_manager.write_resource to return failure
-    original_write = rowa_manager.write_resource
-    rowa_manager.write_resource = AsyncMock(return_value=(False, None))
-    
-    # Register a client callback
-    learner.register_client_callback(
-        instance_id=650,
-        client_id="client-1",
-        callback_url="http://client-1:8080/callback"
-    )
-    
-    # Mock _should_handle_client_notification to return True
-    original_should_handle = learner._should_handle_client_notification
-    learner._should_handle_client_notification = lambda client_id: True
-    
-    # Create and send learn notifications to reach consensus
-    for acceptor_id in range(1, 4):
-        notification = {
-            "type": "LEARN",
-            "proposalNumber": 42,
-            "instanceId": 650,
-            "acceptorId": acceptor_id,
-            "accepted": True,
-            "value": {"clientId": "client-1", "data": "test", "resource": "R"},
-            "timestamp": int(time.time() * 1000)
-        }
-        client.post("/learn", json=notification)
-    
-    # Wait for processing to complete
-    time.sleep(0.5)
-    
-    # Check if HTTP client was called for client notification
-    notification_calls = [call for call in http_client_mock.post.call_args_list 
-                         if "client-1:8080/callback" in str(call)]
-    assert len(notification_calls) > 0
-    
-    # Check notification content has NOT_COMMITTED status due to storage failure
-    notification_call = notification_calls[0]
-    args, kwargs = notification_call
-    assert kwargs.get("json", {}).get("status") == "NOT_COMMITTED"
-    assert kwargs.get("json", {}).get("instanceId") == 650
-    
-    # Restore original methods
-    learner._should_handle_client_notification = original_should_handle
-    rowa_manager.write_resource = original_write
+    try:
+        # Reset HTTP client mock
+        http_client_mock.post.reset_mock()
+        
+        # Configure rowa_manager.write_resource to return failure
+        original_write = rowa_manager.write_resource
+        rowa_manager.write_resource = AsyncMock(return_value=(False, None))
+        
+        # Register a client callback
+        learner.register_client_callback(
+            instance_id=650,
+            client_id="client-1",
+            callback_url="http://client-1:8080/callback"
+        )
+        
+        # Mock _should_handle_client_notification to return True
+        original_should_handle = learner._should_handle_client_notification
+        learner._should_handle_client_notification = lambda client_id: True
+        
+        # Create and send learn notifications to reach consensus
+        for acceptor_id in range(1, 4):
+            notification = {
+                "type": "LEARN",
+                "proposalNumber": 42,
+                "instanceId": 650,
+                "acceptorId": acceptor_id,
+                "accepted": True,
+                "value": {"clientId": "client-1", "data": "test", "resource": "R"},
+                "timestamp": int(time.time() * 1000)
+            }
+            client.post("/learn", json=notification)
+        
+        # Wait for processing to complete
+        time.sleep(0.5)
+        
+        # Check if HTTP client was called for client notification
+        notification_calls = [call for call in http_client_mock.post.call_args_list 
+                             if "client-1:8080/callback" in str(call)]
+        assert len(notification_calls) > 0
+        
+        # Check notification content has NOT_COMMITTED status due to storage failure
+        notification_call = notification_calls[0]
+        args, kwargs = notification_call
+        assert kwargs.get("json", {}).get("status") == "NOT_COMMITTED"
+        assert kwargs.get("json", {}).get("instanceId") == 650
+        
+        # Restore original methods
+        learner._should_handle_client_notification = original_should_handle
+        rowa_manager.write_resource = original_write
+    finally:
+        # Restaurar configuração original
+        learner.use_cluster_store = original_use_cluster_store
 
 def test_full_api_integration(setup_integration):
     """Test all API endpoints together."""
