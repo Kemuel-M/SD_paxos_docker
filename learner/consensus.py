@@ -150,6 +150,8 @@ class ConsensusManager:
             if callback:
                 logger.debug(f"Found callback for instance {instance_id}, executing...")
                 await callback(instance_id, proposal_number, value)
+                # Remover o callback apenas após execução bem-sucedida
+                self.decision_callbacks.pop(instance_id, None)
             else:
                 logger.warning(f"No callback found for instance {instance_id}")
         except Exception as e:

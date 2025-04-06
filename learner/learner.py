@@ -142,17 +142,13 @@ class Learner:
         if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
             logger.debug(f"Processing notification for instance {instance_id} from acceptor {notification.get('acceptorId')}")
         
+        self.consensus_manager.register_decision_callback(instance_id, self._on_decision_made)
+
         # Process notification with consensus manager
         decision_made = await self.consensus_manager.process_notification(notification)
         
         if decision_made:
             logger.info(f"Decision made for instance {instance_id}")
-            
-            # Register callback for the decision if it wasn't already called
-            # (This happens if consensus was reached with this notification)
-            if not self.consensus_manager.is_decided(instance_id):
-                self.consensus_manager.register_decision_callback(
-                    instance_id, self._on_decision_made)
 
         return {"accepted": True, "instanceId": instance_id, "learnerId": self.node_id}
     
