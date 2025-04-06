@@ -194,6 +194,9 @@ run_integration_tests() {
     
     cd $LEARNER_DIR
     
+    # Exibir a configuração de USE_CLUSTER_STORE para debug
+    echo -e "${YELLOW}USE_CLUSTER_STORE=${USE_CLUSTER_STORE}${NC}"
+    
     if [ "$GENERATE_COVERAGE" = true ]; then
         # Executa com cobertura
         if [ "$VERBOSE" = true ]; then
