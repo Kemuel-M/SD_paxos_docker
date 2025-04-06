@@ -195,7 +195,7 @@ class PaxosClient:
                 logger.info(f"Redirecionando operação #{operation_id} para {redirect_url}")
                 
                 # Atualiza o proposer para esta operação específica
-                temp_proposer_url = redirect_url.split("/propose")[0]
+                temp_proposer_url = redirect_url.replace("/propose", "")
                 
                 # Reenviar para o novo proposer após um pequeno delay
                 await asyncio.sleep(0.1)
