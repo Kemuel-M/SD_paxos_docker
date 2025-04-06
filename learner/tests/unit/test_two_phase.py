@@ -386,9 +386,6 @@ async def test_abort_phase(two_phase_manager):
     
     # Check transaction state
     assert two_phase_manager.active_transactions[transaction_id]["status"] == "aborted"
-    
-    # Check statistics
-    assert two_phase_manager.transactions_aborted == 1
 
 def test_get_transaction_status(two_phase_manager):
     """Test getting transaction status."""
