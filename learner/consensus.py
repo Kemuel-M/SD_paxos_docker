@@ -145,9 +145,13 @@ class ConsensusManager:
             value: Decided value
         """
         try:
+            logger.debug(f"Executing callback for instance {instance_id} with proposal {proposal_number}")
             callback = self.decision_callbacks.pop(instance_id, None)
             if callback:
+                logger.debug(f"Found callback for instance {instance_id}, executing...")
                 await callback(instance_id, proposal_number, value)
+            else:
+                logger.warning(f"No callback found for instance {instance_id}")
         except Exception as e:
             logger.error(f"Error executing decision callback for instance {instance_id}: {e}", exc_info=True)
     

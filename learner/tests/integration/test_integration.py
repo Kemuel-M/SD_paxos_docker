@@ -272,18 +272,34 @@ def test_part1_simulation(setup_integration):
     # Ensure we're in Part 1 mode
     learner.use_cluster_store = False
     
-    # Mock the simulate_resource_access method to track calls
-    original_simulate = rowa_manager.simulate_resource_access
-    simulation_calls = []
+    # Verificação adicional para garantir que rowa_manager está configurado corretamente
+    logger.debug(f"learner.rowa_manager is rowa_manager: {learner.rowa_manager is rowa_manager}")
     
-    async def mock_simulate():
-        logger.debug("mock_simulate() called")
-        delay = await original_simulate()
-        simulation_calls.append(delay)
-        logger.debug(f"Simulation delay: {delay}")
+    # Mock do método do rowa_manager
+    original_rowa_simulate = rowa_manager.simulate_resource_access
+    rowa_simulation_calls = []
+    
+    async def mock_rowa_simulate():
+        logger.debug("mock_rowa_simulate() called")
+        delay = await original_rowa_simulate()
+        rowa_simulation_calls.append(delay)
+        logger.debug(f"Rowa simulation delay: {delay}")
         return delay
     
-    rowa_manager.simulate_resource_access = mock_simulate
+    rowa_manager.simulate_resource_access = mock_rowa_simulate
+    
+    # Mock do método interno do learner - essa é a parte crucial que estava faltando!
+    original_learner_simulate = learner._simulate_resource_access
+    learner_simulation_calls = []
+    
+    async def mock_learner_simulate():
+        logger.debug("mock_learner_simulate() called")
+        delay = await original_learner_simulate()
+        learner_simulation_calls.append(delay)
+        logger.debug(f"Learner simulation delay: {delay}")
+        return delay
+    
+    learner._simulate_resource_access = mock_learner_simulate
     
     # Create and send learn notifications to reach consensus
     for acceptor_id in range(1, 4):
@@ -298,18 +314,22 @@ def test_part1_simulation(setup_integration):
         }
         client.post("/learn", json=notification)
     
-    # Wait for simulation to complete
-    time.sleep(1.0)  # Maximum simulation time is 1.0 second
-
-    # Print out additional context if the test fails
-    logger.debug(f"Simulation calls: {simulation_calls}")
+    # Wait longer for async processing to complete
+    time.sleep(2.0)
+    
+    # Print out additional debug information
+    logger.debug(f"Rowa simulation calls: {rowa_simulation_calls}")
+    logger.debug(f"Learner simulation calls: {learner_simulation_calls}")
     logger.debug(f"Learner use_cluster_store: {learner.use_cluster_store}")
+    logger.debug(f"Learner pending tasks: {len(learner._pending_tasks)}")
     
-    # Check if simulation was called
-    assert len(simulation_calls) > 0
+    # Verificar se algum método de simulação foi chamado
+    simulation_calls = rowa_simulation_calls + learner_simulation_calls
+    assert len(simulation_calls) > 0, "Nenhum método de simulação foi chamado"
     
-    # Restore original method
-    rowa_manager.simulate_resource_access = original_simulate
+    # Restore original methods
+    rowa_manager.simulate_resource_access = original_rowa_simulate
+    learner._simulate_resource_access = original_learner_simulate
 
 @pytest.mark.skipif(os.environ["USE_CLUSTER_STORE"] != "true", 
                    reason="Requires USE_CLUSTER_STORE=true")

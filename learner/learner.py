@@ -153,7 +153,7 @@ class Learner:
             if not self.consensus_manager.is_decided(instance_id):
                 self.consensus_manager.register_decision_callback(
                     instance_id, self._on_decision_made)
-        
+
         return {"accepted": True, "instanceId": instance_id, "learnerId": self.node_id}
     
     async def _on_decision_made(self, instance_id: int, proposal_number: int, value: Dict[str, Any]):
