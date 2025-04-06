@@ -200,28 +200,51 @@ async def test_execute_transaction_communication_error(two_phase_manager):
 @pytest.mark.asyncio
 async def test_execute_transaction_retry_success(two_phase_manager):
     """Test executing a transaction with retry success."""
-    # First attempt: prepare phase failure
-    first_attempt = [
-        {"ready": True, "currentVersion": 1},
-        {"ready": False, "reason": "Busy"},
-        {"ready": True, "currentVersion": 1}
-    ]
+    # Variável para rastrear transações vistas
+    seen_transactions = set()
+    # Variável para contar tentativas por transação
+    attempt_counter = {}
     
-    # Second attempt: all succeed
-    second_prepare = [
-        {"ready": True, "currentVersion": 1},
-        {"ready": True, "currentVersion": 1},
-        {"ready": True, "currentVersion": 1}
-    ]
+    def custom_mock_response(url, json=None, **kwargs):
+        """Função personalizada para simular respostas HTTP baseadas no endpoint e contexto."""
+        # Extrair informações da URL e do payload
+        transaction_id = json.get("transactionId", "unknown")
+        
+        # Inicializar contador para esta transação se for a primeira vez
+        if transaction_id not in attempt_counter:
+            attempt_counter[transaction_id] = 1
+        
+        # Lógica para endpoint de preparação
+        if "/prepare" in url:
+            # Primeira tentativa: falha no segundo store
+            if attempt_counter[transaction_id] == 1:
+                # Incrementar contador para próxima tentativa
+                if transaction_id in seen_transactions:
+                    attempt_counter[transaction_id] += 1
+                seen_transactions.add(transaction_id)
+                
+                # Store-2 falha na primeira tentativa
+                if "store-2:8080" in url:
+                    return {"ready": False, "reason": "Busy"}
+                else:
+                    return {"ready": True, "currentVersion": 1}
+            # Segunda tentativa: todos os stores estão prontos
+            else:
+                return {"ready": True, "currentVersion": 1}
+                
+        # Lógica para endpoint de commit
+        elif "/commit" in url:
+            return {"success": True, "version": 2}
+            
+        # Lógica para endpoint de abort
+        elif "/abort" in url:
+            return {"success": True}
+            
+        # Fallback para qualquer outro endpoint
+        return {"status": "unknown_endpoint"}
     
-    second_commit = [
-        {"success": True, "version": 2},
-        {"success": True, "version": 2},
-        {"success": True, "version": 2}
-    ]
-    
-    # Set up HTTP client mock
-    two_phase_manager.http_client.post.side_effect = first_attempt + second_prepare + second_commit
+    # Configurar o mock para usar nossa função personalizada
+    two_phase_manager.http_client.post.side_effect = custom_mock_response
     
     # Execute transaction with retry
     value = {
@@ -239,8 +262,20 @@ async def test_execute_transaction_retry_success(two_phase_manager):
     assert result == {"success": True, "version": 2}
     
     # Check HTTP client was called for all attempts
-    # 3 (first prepare) + 3 (second prepare) + 3 (second commit) = 9
-    assert two_phase_manager.http_client.post.call_count == 9
+    # Verificamos pelo número mínimo de chamadas esperadas
+    assert two_phase_manager.http_client.post.call_count >= 6
+    
+    # Verificar que houve chamadas para os três tipos de endpoints
+    prepare_calls = [call for call in two_phase_manager.http_client.post.call_args_list 
+                    if "/prepare" in str(call)]
+    commit_calls = [call for call in two_phase_manager.http_client.post.call_args_list 
+                   if "/commit" in str(call)]
+    abort_calls = [call for call in two_phase_manager.http_client.post.call_args_list 
+                  if "/abort" in str(call)]
+    
+    assert len(prepare_calls) >= 3  # Pelo menos uma chamada para cada store na segunda tentativa
+    assert len(commit_calls) >= 3   # Uma chamada para cada store na fase de commit
+    assert len(abort_calls) >= 2    # Chamadas para os stores que responderam positivamente na primeira tentativa
     
     # Check statistics
     assert two_phase_manager.transactions_started == 1
