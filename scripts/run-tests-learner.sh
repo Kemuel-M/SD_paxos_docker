@@ -1,7 +1,7 @@
 #!/bin/bash
-# File: scripts/run-tests-acceptor.sh
+# File: scripts/run-tests-learner.sh
 
-# Script para executar todos os testes do Acceptor com relatório de cobertura
+# Script para executar todos os testes do Learner com relatório de cobertura
 
 # Define cores para output
 GREEN='\033[0;32m'
@@ -11,9 +11,9 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Diretórios
-ACCEPTOR_DIR="./acceptor"
-UNIT_TESTS_DIR="$ACCEPTOR_DIR/tests/unit"
-INTEGRATION_TESTS_DIR="$ACCEPTOR_DIR/tests/integration"
+LEARNER_DIR="./learner"
+UNIT_TESTS_DIR="$LEARNER_DIR/tests/unit"
+INTEGRATION_TESTS_DIR="$LEARNER_DIR/tests/integration"
 COVERAGE_DIR="./coverage"
 TMP_TEST_DIR="./tmp-test-data"
 
@@ -21,7 +21,7 @@ TMP_TEST_DIR="./tmp-test-data"
 show_help() {
     echo -e "${BLUE}Uso: $0 [opções]${NC}"
     echo ""
-    echo -e "Script para executar testes do Acceptor com relatório de cobertura."
+    echo -e "Script para executar testes do Learner com relatório de cobertura."
     echo ""
     echo -e "Opções:"
     echo -e "  ${GREEN}-h, --help${NC}       Exibe esta ajuda"
@@ -31,10 +31,12 @@ show_help() {
     echo -e "  ${GREEN}-c, --coverage${NC}   Gera relatório de cobertura"
     echo -e "  ${GREEN}-v, --verbose${NC}    Modo detalhado"
     echo -e "  ${GREEN}-d, --debug${NC}      Nível de debug para os testes (basic, advanced, trace)"
+    echo -e "  ${GREEN}-s, --store${NC}      Habilita testes com Cluster Store"
     echo ""
     echo -e "Exemplos:"
     echo -e "  $0 -a -c -v             Executa todos os testes com cobertura e modo detalhado"
     echo -e "  $0 -u -d advanced       Executa testes unitários com debug avançado"
+    echo -e "  $0 -i -s                Executa testes de integração com Cluster Store"
     exit 0
 }
 
@@ -44,6 +46,7 @@ RUN_INTEGRATION=true
 GENERATE_COVERAGE=false
 VERBOSE=false
 DEBUG_LEVEL="basic"
+USE_CLUSTER_STORE=false
 
 # Processa argumentos
 while [[ $# -gt 0 ]]; do
@@ -77,6 +80,10 @@ while [[ $# -gt 0 ]]; do
         -d|--debug)
             DEBUG_LEVEL="$2"
             shift 2
+            ;;
+        -s|--store)
+            USE_CLUSTER_STORE=true
+            shift
             ;;
         *)
             echo -e "${RED}Opção desconhecida: $1${NC}"
@@ -127,10 +134,19 @@ setup_environment() {
     export NODE_ID=1
     export LOG_DIR="${TMP_TEST_DIR}/logs"
     export DATA_DIR="${TMP_TEST_DIR}/data"
-    export LEARNERS="localhost:8091,localhost:8092"
+    export ACCEPTORS="localhost:8091,localhost:8092,localhost:8093,localhost:8094,localhost:8095"
+    export STORES="localhost:8081,localhost:8082,localhost:8083"
+    
+    if [ "$USE_CLUSTER_STORE" = true ]; then
+        export USE_CLUSTER_STORE=true
+        echo -e "${GREEN}Testes configurados para usar Cluster Store (Parte 2)${NC}"
+    else
+        export USE_CLUSTER_STORE=false
+        echo -e "${GREEN}Testes configurados para simulação (Parte 1)${NC}"
+    fi
     
     # Garante que PYTHONPATH inclua módulos necessários
-    export PYTHONPATH=$PYTHONPATH:$(pwd):$(pwd)/acceptor:$(pwd)/common
+    export PYTHONPATH=$PYTHONPATH:$(pwd):$(pwd)/learner:$(pwd)/common
     
     echo -e "${GREEN}Ambiente configurado com DEBUG_LEVEL=$DEBUG_LEVEL${NC}"
     echo -e "${GREEN}Dados temporários em: $TMP_TEST_DIR${NC}"
@@ -140,7 +156,7 @@ setup_environment() {
 run_unit_tests() {
     echo -e "${YELLOW}====== Executando testes unitários ======${NC}"
     
-    cd $ACCEPTOR_DIR
+    cd $LEARNER_DIR
     
     if [ "$GENERATE_COVERAGE" = true ]; then
         # Executa com cobertura
@@ -176,7 +192,7 @@ run_unit_tests() {
 run_integration_tests() {
     echo -e "${YELLOW}====== Executando testes de integração ======${NC}"
     
-    cd $ACCEPTOR_DIR
+    cd $LEARNER_DIR
     
     if [ "$GENERATE_COVERAGE" = true ]; then
         # Executa com cobertura
@@ -216,7 +232,7 @@ generate_combined_coverage() {
         # Cria diretório para relatório
         mkdir -p $COVERAGE_DIR/combined
         
-        cd $ACCEPTOR_DIR
+        cd $LEARNER_DIR
         
         # Gera relatório combinado
         PYTHONPATH=.:.. pytest -xvs --cov=. --cov-report=html:../$COVERAGE_DIR/combined
@@ -237,7 +253,7 @@ cleanup() {
 
 # ===== EXECUÇÃO PRINCIPAL =====
 
-echo -e "${BLUE}====== Iniciando Testes do Acceptor ======${NC}"
+echo -e "${BLUE}====== Iniciando Testes do Learner ======${NC}"
 
 # Verifica dependências
 check_dependencies
@@ -274,9 +290,9 @@ cleanup
 
 # Verifica resultado final
 if [ "$TESTS_FAILED" = true ]; then
-    echo -e "${RED}====== Alguns testes do Acceptor falharam! ======${NC}"
+    echo -e "${RED}====== Alguns testes do Learner falharam! ======${NC}"
     exit 1
 else
-    echo -e "${GREEN}====== Todos os testes do Acceptor passaram! ======${NC}"
+    echo -e "${GREEN}====== Todos os testes do Learner passaram! ======${NC}"
     exit 0
 fi
