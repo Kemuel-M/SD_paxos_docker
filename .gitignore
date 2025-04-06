@@ -7,7 +7,7 @@ __pycache__/
 
 docs/
 
-proposer/
+proposer/tests/
 scripts/run-tests-proposer.sh
 
 acceptor/
