@@ -101,6 +101,7 @@ async def test_process_notification_quorum(consensus_manager):
     assert consensus_manager.decisions[1][1]["data"] == "test"  # Value
     
     # Check callback
+    await asyncio.sleep(0.1)  # Give time for the callback to be called
     callback_mock.assert_called_once()
     call_args = callback_mock.call_args
     assert call_args[0][0] == 1  # instance_id
