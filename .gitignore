@@ -13,3 +13,7 @@ scripts/run-tests-proposer.sh
 acceptor/
 scripts/run-tests-acceptor.sh
 
+cluster_store/
+scripts/run-tests-cluster-store.sh
+
+
