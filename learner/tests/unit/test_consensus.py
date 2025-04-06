@@ -19,16 +19,22 @@ os.environ["NODE_ID"] = "1"
 
 from consensus import ConsensusManager
 
+# ===== Configuração Global =====
+# Total de acceptors no sistema para testes
+TOTAL_ACCEPTORS = 5
+# Tamanho do quórum (maioria) - seguindo a regra N/2 + 1
+QUORUM_SIZE = (TOTAL_ACCEPTORS // 2) + 1
+
 @pytest.fixture
 def consensus_manager():
     """Fixture that creates a ConsensusManager for tests."""
-    return ConsensusManager(node_id=1, quorum_size=3)
+    return ConsensusManager(node_id=1, quorum_size=QUORUM_SIZE)
 
 @pytest.mark.asyncio
 async def test_initialization(consensus_manager):
     """Test if ConsensusManager is initialized correctly."""
     assert consensus_manager.node_id == 1
-    assert consensus_manager.quorum_size == 3
+    assert consensus_manager.quorum_size == QUORUM_SIZE
     assert isinstance(consensus_manager.votes, defaultdict)
     assert isinstance(consensus_manager.decisions, dict)
     assert consensus_manager.notifications_processed == 0
@@ -79,21 +85,22 @@ async def test_process_notification_quorum(consensus_manager):
     callback_mock = AsyncMock()
     consensus_manager.register_decision_callback(1, callback_mock)
     
-    # Process three notifications from different acceptors
+    # Process QUORUM_SIZE notifications from different acceptors
     decisions = []
-    for acceptor_id in range(1, 4):
+    for acceptor_id in range(1, QUORUM_SIZE + 1):
         notification = base_notification.copy()
         notification["acceptorId"] = acceptor_id
         
         result = await consensus_manager.process_notification(notification)
         decisions.append(result)
     
-    # Check results
-    assert decisions == [False, False, True]  # Decision made with the third notification
+    # Check results - last notification should trigger decision
+    expected_results = [False] * (QUORUM_SIZE - 1) + [True]
+    assert decisions == expected_results
     
     # Check state
     assert 1 in consensus_manager.decisions
-    assert consensus_manager.notifications_processed == 3
+    assert consensus_manager.notifications_processed == QUORUM_SIZE
     assert consensus_manager.decisions_made == 1
     
     # Check decision value
@@ -134,22 +141,31 @@ async def test_process_notification_different_values(consensus_manager):
     await consensus_manager.process_notification(notification1)
     await consensus_manager.process_notification(notification2)
     
-    # Neither value should have reached quorum
-    assert 1 not in consensus_manager.decisions
+    # Determine se devemos ter quórum baseado no número total de votos
+    # e no tamanho do quórum necessário
+    has_quorum_yet = (QUORUM_SIZE <= 2)
+    if has_quorum_yet:
+        assert 1 in consensus_manager.decisions
+    else:
+        # Se precisamos de mais de 2 votos para quórum, não deve ter decisão ainda
+        assert 1 not in consensus_manager.decisions
     
-    # Now process a third notification with value1 to reach quorum
-    notification3 = {
-        "instanceId": 1,
-        "proposalNumber": 42,
-        "acceptorId": 3,
-        "accepted": True,
-        "value": {"data": "value1"},
-        "timestamp": int(time.time() * 1000)
-    }
+    # Add enough notifications with value1 to reach quorum
+    result = False
+    remaining_votes_needed = max(0, QUORUM_SIZE - 1)  # -1 porque já temos um voto para value1
     
-    result = await consensus_manager.process_notification(notification3)
+    for acceptor_id in range(3, 3 + remaining_votes_needed):
+        notification = {
+            "instanceId": 1,
+            "proposalNumber": 42,
+            "acceptorId": acceptor_id,
+            "accepted": True,
+            "value": {"data": "value1"},
+            "timestamp": int(time.time() * 1000)
+        }
+        result = await consensus_manager.process_notification(notification)
     
-    # Check result
+    # Verificar se o último voto resultou em decisão
     assert result == True
     
     # Check decision value
@@ -159,7 +175,7 @@ async def test_process_notification_different_values(consensus_manager):
 async def test_process_notification_higher_proposal(consensus_manager):
     """Test processing notifications with a higher proposal number."""
     # First, decide on a value with proposal 42
-    for acceptor_id in range(1, 4):
+    for acceptor_id in range(1, QUORUM_SIZE + 1):
         notification = {
             "instanceId": 1,
             "proposalNumber": 42,
@@ -171,7 +187,7 @@ async def test_process_notification_higher_proposal(consensus_manager):
         await consensus_manager.process_notification(notification)
     
     # Now process notifications with a higher proposal number
-    for acceptor_id in range(1, 4):
+    for acceptor_id in range(1, QUORUM_SIZE + 1):
         notification = {
             "instanceId": 1,
             "proposalNumber": 50,
@@ -225,7 +241,7 @@ async def test_process_invalid_notification(consensus_manager):
 async def test_register_decision_callback_already_decided(consensus_manager):
     """Test registering a callback for an already decided instance."""
     # First, decide on a value
-    for acceptor_id in range(1, 4):
+    for acceptor_id in range(1, QUORUM_SIZE + 1):
         notification = {
             "instanceId": 1,
             "proposalNumber": 42,

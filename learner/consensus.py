@@ -91,37 +91,49 @@ class ConsensusManager:
                 return False
             
             # Add vote
-            self.votes[instance_id][proposal_number][self._hash_value(value)].add(acceptor_id)
+            value_hash = self._hash_value(value)
+            self.votes[instance_id][proposal_number][value_hash].add(acceptor_id)
             
             if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
                 logger.debug(f"Added vote for instance {instance_id}, proposal {proposal_number} from acceptor {acceptor_id}")
                 logger.debug(f"Current votes for instance {instance_id}, proposal {proposal_number}: {self.votes[instance_id][proposal_number]}")
             
+            # Armazenar uma referência ao valor original
+            # Esta é a parte crucial da correção
+            if not hasattr(self, '_value_map'):
+                self._value_map = {}
+            if instance_id not in self._value_map:
+                self._value_map[instance_id] = {}
+            if proposal_number not in self._value_map[instance_id]:
+                self._value_map[instance_id][proposal_number] = {}
+            self._value_map[instance_id][proposal_number][value_hash] = value
+            
             # Check if consensus is reached
             for prop_num in sorted(self.votes[instance_id].keys(), reverse=True):
                 for val_hash, acceptors in self.votes[instance_id][prop_num].items():
                     if len(acceptors) >= self.quorum_size:
-                        # Consensus reached, mark as decided
-                        self.decisions[instance_id] = (prop_num, value)
+                        # Consenso alcançado, usa o valor que atingiu o quórum
+                        decided_value = self._value_map[instance_id][prop_num][val_hash]
+                        self.decisions[instance_id] = (prop_num, decided_value)
                         self.decisions_made += 1
                         
                         logger.info(f"Consensus reached for instance {instance_id} with proposal {prop_num}")
                         
                         if DEBUG:
-                            logger.debug(f"Decided value for instance {instance_id}: {value}")
+                            logger.debug(f"Decided value for instance {instance_id}: {decided_value}")
                         
                         # Call decision callback if registered
                         if instance_id in self.decision_callbacks:
                             # Schedule callback execution
-                            asyncio.create_task(self._execute_callback(instance_id, prop_num, value))
+                            asyncio.create_task(self._execute_callback(instance_id, prop_num, decided_value))
                         
                         decision_made = True
                         break
-                
+                    
                 if decision_made:
                     break
-        
-        return decision_made
+            
+            return decision_made
     
     async def _execute_callback(self, instance_id: int, proposal_number: int, value: Any):
         """
