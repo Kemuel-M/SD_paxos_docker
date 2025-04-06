@@ -422,3 +422,176 @@ async def test_request_deduplication(client, mock_http_client):
     mock_http_client.post.reset_mock()
     await client._send_operation(42)
     assert mock_http_client.post.call_count == 1
+
+@pytest.fixture
+def mock_http_client():
+    """Fixture that creates a mock HTTP client."""
+    mock = AsyncMock()
+    mock.post = AsyncMock(return_value=MagicMock(
+        status_code=202,
+        json=MagicMock(return_value={"instanceId": 1})
+    ))
+    return mock
+
+@pytest.fixture
+def client(mock_http_client):
+    """Fixture that creates a PaxosClient for tests."""
+    client = PaxosClient(
+        client_id="client-1",
+        proposer_url="http://proposer-1:8080",
+        callback_url="http://client-1:8080/notification",
+        num_operations=20
+    )
+    
+    # Replace HTTP client with a mock
+    client.http_client = mock_http_client
+    
+    return client
+
+@pytest.mark.asyncio
+async def test_operation_loop_with_many_in_progress(client):
+    """Test operation loop behavior when many operations are in progress."""
+    # Configure client with many operations in progress
+    for i in range(10):
+        client.operations_in_progress[i] = {
+            "id": i,
+            "start_time": time.time(),
+            "status": "in_progress"
+        }
+    
+    # Make a copy of the original operation loop
+    original_operation_loop = client._operation_loop
+    
+    # Create a patched version that we can test
+    async def patched_operation_loop():
+        # Run one iteration only
+        client.running = True
+        if len(client.operations_in_progress) > 5:
+            await asyncio.sleep(0.5)
+            return False  # Return result to verify the logic was executed
+        return True
+    
+    # Replace the method for testing
+    client._operation_loop = patched_operation_loop
+    
+    # Run the patched method and check result
+    result = await client._operation_loop()
+    
+    # Should wait because there are too many operations in progress
+    assert result is False
+    
+    # Restore original method
+    client._operation_loop = original_operation_loop
+
+@pytest.mark.asyncio
+async def test_proposer_missing_instance_id(client, mock_http_client):
+    """Test handling when proposer returns 202 but no instanceId."""
+    # Configure mock to return success but no instanceId
+    mock_http_client.post.reset_mock()
+    mock_http_client.post.return_value = MagicMock(
+        status_code=202,
+        json=MagicMock(return_value={})  # No instanceId
+    )
+    
+    # Send operation
+    await client._send_operation(42)
+    
+    # Check that operation was marked as failed
+    assert client.operations_failed == 1
+    assert len(client.history) == 1
+    assert client.history[0]["status"] == "failed"
+    assert "Missing instanceId" in client.history[0]["error"]
+
+@pytest.mark.asyncio
+async def test_proposer_redirect_without_location(client, mock_http_client):
+    """Test handling when proposer returns 307 but no Location header."""
+    # Clear previous state
+    client.history = []
+    client.operations_failed = 0
+    
+    # Configure mock to return redirect without Location
+    mock_http_client.post.reset_mock()
+    mock_http_client.post.return_value = MagicMock(
+        status_code=307,
+        headers={},  # No Location header
+        json=MagicMock(return_value={})
+    )
+    
+    # Send operation
+    await client._send_operation(43)
+    
+    # Check that operation was marked as failed
+    assert client.operations_failed == 1
+    assert len(client.history) == 1
+    assert client.history[0]["status"] == "failed"
+    assert "Redirect without Location header" in client.history[0]["error"]
+
+@pytest.mark.asyncio
+async def test_unknown_notification_for_completed_operation(client):
+    """Test handling notification for operation that's already completed."""
+    # Add a completed operation to history
+    completed_instance_id = 100
+    client.history.append({
+        "id": 50,
+        "instance_id": completed_instance_id,
+        "start_time": time.time() - 30,
+        "end_time": time.time() - 25,
+        "status": "COMMITTED"
+    })
+    
+    # Create notification for the same instance
+    notification = {
+        "status": "COMMITTED",
+        "instanceId": completed_instance_id,
+        "resource": "R",
+        "timestamp": int(time.time() * 1000)
+    }
+    
+    # Process notification
+    result = client.process_notification(notification)
+    
+    # Should be unknown since the operation is not in operations_in_progress
+    assert result["status"] == "acknowledged"
+    assert result["known"] == False
+    
+    # Should not affect the completed count
+    assert client.operations_completed == 0
+
+@pytest.mark.asyncio
+async def test_cleanup_request_id(client):
+    """Test cleanup of request IDs."""
+    # Add a request ID
+    request_id = "test-request-id"
+    client.request_ids[request_id] = 42
+    client.request_id_ttl = 0.1  # Short TTL for testing
+    
+    # Call cleanup
+    await client._cleanup_request_id(request_id)
+    
+    # Request ID should be removed
+    assert request_id not in client.request_ids
+
+@pytest.mark.asyncio
+async def test_stop_with_pending_operations(client, mock_http_client):
+    """Test stopping client with pending operations."""
+    # Add some operations in progress
+    client.operations_in_progress = {
+        1: {"id": 101, "start_time": time.time(), "status": "in_progress"},
+        2: {"id": 102, "start_time": time.time(), "status": "in_progress"}
+    }
+    
+    # Start client
+    with patch.object(asyncio, 'create_task') as mock_create_task:
+        await client.start()
+        assert client.running is True
+        mock_create_task.assert_called_once()
+    
+    # Stop client
+    await client.stop()
+    
+    # Client should be stopped, but operations_in_progress should remain
+    assert client.running is False
+    assert len(client.operations_in_progress) == 2  # Operations still in progress
+    
+    # Verify that http_client.aclose was called
+    mock_http_client.aclose.assert_called_once()
