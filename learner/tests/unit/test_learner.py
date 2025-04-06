@@ -221,11 +221,13 @@ async def test_on_decision_made(learner, mock_consensus_manager, mock_rowa_manag
         
         # Check that the decided value was processed
         mock_rowa_manager.write_resource.assert_called_once()
-        call_args = mock_rowa_manager.write_resource.call_args
-        assert call_args[1]["resource_id"] == "R"
-        assert call_args[1]["data"] == "test data"
-        assert call_args[1]["client_id"] == "client-1"
-        assert call_args[1]["instance_id"] == 1
+        mock_rowa_manager.write_resource.assert_called_once_with(
+            "R",                        # resource_id
+            "test data",                # data
+            "client-1",                 # client_id
+            1,                          # instance_id
+            value["timestamp"]          # client_timestamp
+        )
         
         # Check statistics
         assert learner.decisions_made == 1
