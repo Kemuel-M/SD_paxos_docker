@@ -218,8 +218,19 @@ class Learner:
                         result["reason"] = "Write to Cluster Store failed"
             else:
                 # Simulate resource access (Part 1)
-                delay = await self.rowa_manager.simulate_resource_access() if self.rowa_manager else await self._simulate_resource_access()
-                logger.info(f"Simulated resource access for instance {instance_id} took {delay:.3f}s")
+                try:
+                    if self.rowa_manager:
+                        delay = await self.rowa_manager.simulate_resource_access()
+                    else:
+                        delay = await self._simulate_resource_access()
+                    logger.info(f"Simulated resource access for instance {instance_id} took {delay:.3f}s")
+                except Exception as e:
+                    logger.error(f"Error during resource simulation: {e}", exc_info=True)
+                    # Tenta com o método de backup se o principal falhar
+                    if self.rowa_manager and hasattr(self, '_simulate_resource_access'):
+                        logger.info("Trying backup simulation method")
+                        delay = await self._simulate_resource_access()
+                        logger.info(f"Backup simulation took {delay:.3f}s")
             
             # Notify client if this learner is responsible
             if should_notify:
