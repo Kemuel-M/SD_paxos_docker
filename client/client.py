@@ -18,7 +18,7 @@ class PaxosClient:
     Envia requisições ao proposer e processa notificações dos learners.
     """
     def __init__(self, client_id: str, proposer_url: str, callback_url: str, 
-                num_operations: Optional[int] = None):
+                num_operations: Optional[int] = None, resource_id: str = "R"):
         """
         Inicializa o cliente Paxos.
         
@@ -41,6 +41,11 @@ class PaxosClient:
         self.history = []  # Histórico de operações
         self.running = False
         self.http_client = httpx.AsyncClient(timeout=10.0)
+
+        self.request_ids = {}  # Para rastrear requisições duplicadas: request_id -> operation_id
+        self.request_id_ttl = 300  # TTL em segundos para IDs de requisição
+        self.resource_id = resource_id
+        logger.info(f"Cliente {client_id} inicializado para recurso {resource_id}")
         
         # Métricas
         self.latencies = []
@@ -109,13 +114,27 @@ class PaxosClient:
             # Gera dados da operação
             timestamp = int(time.time() * 1000)
             data = f"Data {self.client_id}-{operation_id} at {timestamp}"
+
+            # Cria ID de requisição para desduplicação
+            request_id = f"{self.client_id}-{operation_id}-{timestamp}"
+            
+            # Verifica se é uma requisição duplicada
+            if request_id in self.request_ids:
+                logger.info(f"Requisição duplicada detectada: {request_id}, ignorando.")
+                return
+                
+            # Armazena ID de requisição
+            self.request_ids[request_id] = operation_id
+            
+            # Agenda limpeza do ID de requisição após TTL
+            asyncio.create_task(self._cleanup_request_id(request_id))
             
             # Cria payload da requisição
             payload = {
                 "clientId": self.client_id,
                 "timestamp": timestamp,
                 "operation": "WRITE",
-                "resource": "R",
+                "resource": self.resource_id,
                 "data": data
             }
             
@@ -185,9 +204,9 @@ class PaxosClient:
                 new_payload = {
                     "clientId": self.client_id,
                     "timestamp": int(time.time() * 1000),  # Atualiza timestamp
-                    "operation": "WRITE",
-                    "resource": "R",
-                    "data": data
+                    "operation": operation_info["payload"]["operation"],
+                    "resource": operation_info["payload"]["resource"],
+                    "data": operation_info["payload"]["data"]  # Usa os dados do payload original
                 }
                 
                 # Envia para o novo proposer
@@ -275,6 +294,13 @@ class PaxosClient:
                 logger.info(f"Tentando novamente operação #{operation_id} após {retry_delay:.2f}s")
                 await asyncio.sleep(retry_delay)
                 await self._send_operation(operation_id, retries + 1)
+
+    # Método para limpar IDs de requisição antigos
+    async def _cleanup_request_id(self, request_id: str):
+        await asyncio.sleep(self.request_id_ttl)
+        if request_id in self.request_ids:
+            self.request_ids.pop(request_id)
+            logger.debug(f"ID de requisição expirado removido: {request_id}")
     
     async def _handle_operation_timeout(self, instance_id: str):
         """

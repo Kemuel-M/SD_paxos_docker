@@ -365,3 +365,60 @@ def test_get_operation(client):
     assert op3["status"] == "in_progress"
     
     assert op4 is None  # Not found
+
+@pytest.mark.asyncio
+async def test_network_partition(client, mock_http_client):
+    """Testa o comportamento do cliente durante uma partição de rede."""
+    import httpx
+    # Simula partição - todas as requisições falham
+    mock_http_client.post.side_effect = httpx.ConnectError("Falha de conexão simulada")
+    
+    # Envia operação durante a partição
+    with patch('asyncio.sleep', AsyncMock()):
+        await client._send_operation(100, retries=0)
+    
+    # Verifica que a operação foi marcada como falha após retentativas
+    failed_op = next((op for op in client.history if op.get("id") == 100), None)
+    assert failed_op is not None
+    assert failed_op["status"] == "failed"
+    assert "ConnectError" in failed_op.get("error", "")
+    
+    # Simula recuperação da partição
+    mock_http_client.post.side_effect = None
+    mock_http_client.post.return_value = MagicMock(
+        status_code=202,
+        json=MagicMock(return_value={"instanceId": 101})
+    )
+    
+    # Verifica que novas operações funcionam
+    await client._send_operation(101)
+    assert 101 in client.operations_in_progress
+
+@pytest.mark.asyncio
+async def test_request_deduplication(client, mock_http_client):
+    """Testa a desduplicação de requisições."""
+    # Configura o cliente com desduplicação
+    client.request_ids = {}
+    client.request_id_ttl = 0.5  # TTL curto para teste
+    
+    # Primeira tentativa da operação
+    await client._send_operation(42)
+    
+    # Verificar que o HTTP client foi chamado
+    assert mock_http_client.post.call_count == 1
+    
+    # Segunda tentativa da mesma operação (com mesmo ID de operação)
+    # Deve ser detectada como duplicada e ignorada
+    mock_http_client.post.reset_mock()
+    await client._send_operation(42)
+    
+    # Verificar que o HTTP client não foi chamado na segunda vez
+    assert mock_http_client.post.call_count == 0
+    
+    # Aguarda expiração do TTL
+    await asyncio.sleep(1.0)
+    
+    # Após expiração, deve aceitar novamente
+    mock_http_client.post.reset_mock()
+    await client._send_operation(42)
+    assert mock_http_client.post.call_count == 1
