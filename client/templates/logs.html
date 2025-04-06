@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cliente Paxos - Logs</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/css/styles.css') }}">
+    <meta http-equiv="refresh" content="10">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Cliente Paxos - {{ client_id }}</h1>
+            <nav>
+                <ul>
+                    <li><a href="/">Dashboard</a></li>
+                    <li><a href="/resources">Recursos</a></li>
+                    <li><a href="/history">Histórico</a></li>
+                    <li><a href="/logs" class="active">Logs</a></li>
+                    <li><a href="/system-logs">Logs do Sistema</a></li>
+                </ul>
+            </nav>
+        </header>
+
+        <main>
+            <section class="logs-panel">
+                <h2>Logs do Cliente</h2>
+                <div class="filters">
+                    <div class="filter-group">
+                        <label for="level-filter">Nível:</label>
+                        <select id="level-filter">
+                            <option value="all">Todos</option>
+                            <option value="DEBUG">DEBUG</option>
+                            <option value="INFO">INFO</option>
+                            <option value="IMPORTANT">IMPORTANT</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="ERROR">ERROR</option>
+                            <option value="CRITICAL">CRITICAL</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="search">Busca:</label>
+                        <input type="text" id="search" placeholder="Buscar nos logs...">
+                    </div>
+                </div>
+                <div class="table-container">
+                    <table id="logs-table">
+                        <thead>
+                            <tr>
+                                <th>Timestamp</th>
+                                <th>Nível</th>
+                                <th>Módulo</th>
+                                <th>Mensagem</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for log in logs %}
+                            <tr data-level="{{ log.level }}">
+                                <td>{{ log.timestamp }}</td>
+                                <td class="level-{{ log.level }}">{{ log.level }}</td>
+                                <td>{{ log.module }}</td>
+                                <td>{{ log.message }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            <p>Cliente Paxos - Sistema de Consenso Distribuído</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', path='/js/main.js') }}"></script>
+</body>
+</html>
