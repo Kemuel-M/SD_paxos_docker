@@ -1,19 +1,31 @@
 zzz/
 venv/
+docs/
 README.md
 
 .pytest_cache/
 __pycache__/
 
-docs/
 
+
+# Proposer
 proposer/
 scripts/run-tests-proposer.sh
 
+# Acceptor
 acceptor/
 scripts/run-tests-acceptor.sh
 
+# learner
+learner/
+scripts/run-tests-learner.sh
+
+# Client
+
+
+# Cluster_Store
 cluster_store/
 scripts/run-tests-cluster-store.sh
 
-
+# Extras
+docker-compose.yml
