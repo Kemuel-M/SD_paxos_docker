@@ -76,7 +76,8 @@ def setup_integration():
         client = TestClient(app)
         
         # Start learner
-        loop = asyncio.get_event_loop()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         loop.run_until_complete(learner.start())
         
         # Return components for tests
@@ -87,12 +88,28 @@ def setup_integration():
             "rowa_manager": rowa_manager,
             "two_phase_manager": two_phase_manager,
             "client": client,
-            "http_client_mock": http_client_mock
+            "http_client_mock": http_client_mock,
+            "loop": loop  # Passar o loop para os testes
         }
         
         # Cleanup
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(learner.stop())
+        try:
+            if not loop.is_closed():
+                loop.run_until_complete(learner.stop())
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e):
+                # Criar um novo loop se o anterior estiver fechado
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                new_loop.run_until_complete(learner.stop())
+                new_loop.close()
+            else:
+                raise
+        
+        # Fechar o loop original se ainda estiver aberto
+        if not loop.is_closed():
+            loop.close()
+
         try:
             shutil.rmtree(temp_dir)
             shutil.rmtree(os.environ["LOG_DIR"])
@@ -267,12 +284,20 @@ def run_async(coroutine):
     Executa uma coroutine de forma síncrona e retorna seu resultado.
     Útil para testar código assíncrono em contextos síncronos.
     """
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
+        # Tentar usar o loop existente primeiro
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("Loop is closed")
         return loop.run_until_complete(coroutine)
-    finally:
-        loop.close()
+    except (RuntimeError, asyncio.InvalidStateError):
+        # Se o loop estiver fechado ou em estado inválido, criar um novo
+        new_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(new_loop)
+        try:
+            return new_loop.run_until_complete(coroutine)
+        finally:
+            new_loop.close()
 
 # Versão modificada do teste
 def test_part1_simulation(setup_integration):
