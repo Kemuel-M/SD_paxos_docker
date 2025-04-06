@@ -12,3 +12,5 @@ scripts/run-tests-proposer.sh
 
 acceptor/
 scripts/run-tests-acceptor.sh
+
+learner/tests/unit/
