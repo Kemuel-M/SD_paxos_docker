@@ -76,6 +76,7 @@ def mock_client():
     
     client.start = AsyncMock()
     client.stop = AsyncMock()
+    client._send_operation = AsyncMock()
     client.running = True
     client.next_operation_id = 10
     
