@@ -357,7 +357,8 @@ class TwoPhaseCommitManager:
         if not ready_participants:
             logger.info(f"No ready participants to abort for transaction {transaction_id}")
             async with self.lock:
-                self.transactions_aborted += 1
+                # Nota: NÃO incrementamos transactions_aborted aqui, 
+                # pois isso será feito em execute_transaction
                 if transaction_id in self.active_transactions:
                     self.active_transactions[transaction_id]["status"] = "aborted"
                     self.active_transactions[transaction_id]["end_time"] = current_timestamp()
@@ -397,7 +398,8 @@ class TwoPhaseCommitManager:
                 all_aborted = False
         
         async with self.lock:
-            self.transactions_aborted += 1
+            # Nota: NÃO incrementamos transactions_aborted aqui,
+            # pois isso será feito em execute_transaction
             if transaction_id in self.active_transactions:
                 self.active_transactions[transaction_id]["status"] = "aborted"
                 self.active_transactions[transaction_id]["end_time"] = current_timestamp()

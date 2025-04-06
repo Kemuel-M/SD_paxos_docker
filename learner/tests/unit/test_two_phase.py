@@ -7,7 +7,7 @@ import json
 import time
 import pytest
 import asyncio
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch, AsyncMock, call
 
 import warnings
 warnings.filterwarnings("always", category=RuntimeWarning)
@@ -110,10 +110,20 @@ async def test_execute_transaction_prepare_failure(two_phase_manager):
     assert success is False
     assert result is None
     
-    # Check HTTP client was called for prepare phase
-    assert two_phase_manager.http_client.post.call_count == 3
+    # Verificar chamadas à fase de preparação
+    prepare_calls = [call for call in two_phase_manager.http_client.post.call_args_list 
+                    if '/prepare' in str(call)]
+    assert len(prepare_calls) == 3, f"Expected 3 prepare calls, got {len(prepare_calls)}"
     
-    # Check statistics
+    # Verificar chamadas à fase de aborto
+    abort_calls = [call for call in two_phase_manager.http_client.post.call_args_list 
+                  if '/abort' in str(call)]
+    assert len(abort_calls) == 2, f"Expected 2 abort calls, got {len(abort_calls)}"
+    
+    # Verificar número total de chamadas
+    assert two_phase_manager.http_client.post.call_count == 5, f"Expected 5 total calls, got {two_phase_manager.http_client.post.call_count}"
+    
+    # Verificar estatísticas
     assert two_phase_manager.transactions_started == 1
     assert two_phase_manager.transactions_committed == 0
     assert two_phase_manager.transactions_aborted == 1
