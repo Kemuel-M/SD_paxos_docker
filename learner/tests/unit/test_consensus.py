@@ -8,6 +8,7 @@ import time
 import pytest
 import asyncio
 from unittest.mock import MagicMock, patch, AsyncMock
+from collections import defaultdict
 
 import warnings
 warnings.filterwarnings("always", category=RuntimeWarning)

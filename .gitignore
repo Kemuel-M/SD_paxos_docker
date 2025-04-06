@@ -1,5 +1,6 @@
 zzz/
 venv/
+README.md
 
 .pytest_cache/
 __pycache__/
