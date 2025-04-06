@@ -264,6 +264,10 @@ def test_part1_simulation(setup_integration):
     client = setup_integration["client"]
     learner = setup_integration["learner"]
     rowa_manager = setup_integration["rowa_manager"]
+
+    import logging
+    logging.basicConfig(level=logging.DEBUG)
+    logger = logging.getLogger(__name__)
     
     # Ensure we're in Part 1 mode
     learner.use_cluster_store = False
@@ -273,8 +277,10 @@ def test_part1_simulation(setup_integration):
     simulation_calls = []
     
     async def mock_simulate():
+        logger.debug("mock_simulate() called")
         delay = await original_simulate()
         simulation_calls.append(delay)
+        logger.debug(f"Simulation delay: {delay}")
         return delay
     
     rowa_manager.simulate_resource_access = mock_simulate
@@ -294,6 +300,10 @@ def test_part1_simulation(setup_integration):
     
     # Wait for simulation to complete
     time.sleep(1.0)  # Maximum simulation time is 1.0 second
+
+    # Print out additional context if the test fails
+    logger.debug(f"Simulation calls: {simulation_calls}")
+    logger.debug(f"Learner use_cluster_store: {learner.use_cluster_store}")
     
     # Check if simulation was called
     assert len(simulation_calls) > 0
