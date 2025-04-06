@@ -515,10 +515,15 @@ def test_client_notification(setup_integration):
     """Test the client notification mechanism."""
     client = setup_integration["client"]
     learner = setup_integration["learner"]
+    rowa_manager = setup_integration["rowa_manager"]  # Adicionado rowa_manager
     http_client_mock = setup_integration["http_client_mock"]
     
     # Reset HTTP client mock
     http_client_mock.post.reset_mock()
+    
+    # Mock rowa_manager.write_resource para retornar sucesso controlado
+    original_write = rowa_manager.write_resource
+    rowa_manager.write_resource = AsyncMock(return_value=(True, {"version": 2}))
     
     # Register a client callback
     learner.register_client_callback(
@@ -531,35 +536,110 @@ def test_client_notification(setup_integration):
     original_should_handle = learner._should_handle_client_notification
     learner._should_handle_client_notification = lambda client_id: True
     
-    # Create and send learn notifications to reach consensus
-    for acceptor_id in range(1, 4):
-        notification = {
-            "type": "LEARN",
-            "proposalNumber": 42,
-            "instanceId": 600,
-            "acceptorId": acceptor_id,
-            "accepted": True,
-            "value": {"clientId": "client-1", "data": "test", "resource": "R"},
-            "timestamp": int(time.time() * 1000)
-        }
-        client.post("/learn", json=notification)
+    try:
+        # Create and send learn notifications to reach consensus
+        for acceptor_id in range(1, 4):
+            notification = {
+                "type": "LEARN",
+                "proposalNumber": 42,
+                "instanceId": 600,
+                "acceptorId": acceptor_id,
+                "accepted": True,
+                "value": {"clientId": "client-1", "data": "test", "resource": "R"},
+                "timestamp": int(time.time() * 1000)
+            }
+            client.post("/learn", json=notification)
+        
+        # Implementar polling para aguardar a notificação
+        notification_found = False
+        for _ in range(10):  # Tentar até 10 vezes (5 segundos total)
+            notification_calls = [call for call in http_client_mock.post.call_args_list 
+                                if "client-1:8080/callback" in str(call)]
+            if notification_calls:
+                notification_found = True
+                break
+            time.sleep(0.5)
+        
+        # Verificar se o cliente HTTP foi chamado para notificação
+        assert notification_found, "Notificação do cliente não foi enviada após espera"
+        
+        # Verificar conteúdo da notificação
+        notification_calls = [call for call in http_client_mock.post.call_args_list 
+                            if "client-1:8080/callback" in str(call)]
+        notification_call = notification_calls[0]
+        args, kwargs = notification_call
+        assert kwargs.get("json", {}).get("status") == "COMMITTED"
+        assert kwargs.get("json", {}).get("instanceId") == 600
+        
+    finally:
+        # Restaurar métodos originais
+        learner._should_handle_client_notification = original_should_handle
+        rowa_manager.write_resource = original_write
+
+def test_client_notification_failure(setup_integration):
+    """Test client notification when write operation fails."""
+    client = setup_integration["client"]
+    learner = setup_integration["learner"]
+    rowa_manager = setup_integration["rowa_manager"]
+    http_client_mock = setup_integration["http_client_mock"]
     
-    # Wait for processing to complete
-    time.sleep(0.5)
+    # Reset HTTP client mock
+    http_client_mock.post.reset_mock()
     
-    # Check if HTTP client was called for client notification
-    notification_calls = [call for call in http_client_mock.post.call_args_list 
-                         if "client-1:8080/callback" in str(call)]
-    assert len(notification_calls) > 0
+    # Mock rowa_manager.write_resource para simular falha
+    original_write = rowa_manager.write_resource
+    rowa_manager.write_resource = AsyncMock(return_value=(False, None))
     
-    # Check notification content
-    notification_call = notification_calls[0]
-    args, kwargs = notification_call
-    assert kwargs.get("json", {}).get("status") == "COMMITTED"
-    assert kwargs.get("json", {}).get("instanceId") == 600
+    # Register a client callback
+    learner.register_client_callback(
+        instance_id=650,  # Usar ID diferente para evitar conflito
+        client_id="client-1",
+        callback_url="http://client-1:8080/callback"
+    )
     
-    # Restore original method
-    learner._should_handle_client_notification = original_should_handle
+    # Mock _should_handle_client_notification to return True
+    original_should_handle = learner._should_handle_client_notification
+    learner._should_handle_client_notification = lambda client_id: True
+    
+    try:
+        # Create and send learn notifications to reach consensus
+        for acceptor_id in range(1, 4):
+            notification = {
+                "type": "LEARN",
+                "proposalNumber": 42,
+                "instanceId": 650,
+                "acceptorId": acceptor_id,
+                "accepted": True,
+                "value": {"clientId": "client-1", "data": "test", "resource": "R"},
+                "timestamp": int(time.time() * 1000)
+            }
+            client.post("/learn", json=notification)
+        
+        # Implementar polling para aguardar a notificação
+        notification_found = False
+        for _ in range(10):  # Tentar até 10 vezes (5 segundos total)
+            notification_calls = [call for call in http_client_mock.post.call_args_list 
+                                if "client-1:8080/callback" in str(call)]
+            if notification_calls:
+                notification_found = True
+                break
+            time.sleep(0.5)
+        
+        # Verificar se o cliente HTTP foi chamado para notificação
+        assert notification_found, "Notificação do cliente não foi enviada após espera"
+        
+        # Verificar conteúdo da notificação - deve ser NOT_COMMITTED devido à falha
+        notification_calls = [call for call in http_client_mock.post.call_args_list 
+                            if "client-1:8080/callback" in str(call)]
+        notification_call = notification_calls[0]
+        args, kwargs = notification_call
+        assert kwargs.get("json", {}).get("status") == "NOT_COMMITTED"
+        assert kwargs.get("json", {}).get("instanceId") == 650
+        
+    finally:
+        # Restaurar métodos originais
+        learner._should_handle_client_notification = original_should_handle
+        rowa_manager.write_resource = original_write
 
 # Este teste agora usa a fixture require_cluster_store
 def test_client_notification_on_storage_failure(setup_integration, require_cluster_store):
