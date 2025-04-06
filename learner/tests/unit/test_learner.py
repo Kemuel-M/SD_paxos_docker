@@ -24,14 +24,14 @@ def mock_consensus_manager():
     """Fixture that creates a mock ConsensusManager."""
     mock = AsyncMock()
     
-    # Mock methods
+    # Todos os métodos usam AsyncMock para consistência
+    mock.get_all_instance_ids = AsyncMock(return_value=[1])
     mock.process_notification = AsyncMock(return_value=False)
-    mock.is_decided = MagicMock(return_value=False)
-    mock.get_decision = MagicMock(return_value=None)
-    mock.register_decision_callback = MagicMock()
-    mock.get_all_instance_ids = MagicMock(return_value=[])
-    mock.get_instance_info = MagicMock(return_value={})
-    mock.get_stats = MagicMock(return_value={
+    mock.is_decided = AsyncMock(return_value=False)
+    mock.get_decision = AsyncMock(return_value=None)
+    mock.register_decision_callback = AsyncMock()
+    mock.get_instance_info = AsyncMock(return_value={})
+    mock.get_stats = AsyncMock(return_value={
         "active_instances": 0,
         "decided_instances": 0,
         "notifications_processed": 0,
