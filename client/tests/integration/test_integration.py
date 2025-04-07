@@ -126,6 +126,9 @@ def test_client_operation_flow(setup_integration):
         status_code=202,
         json=MagicMock(return_value={"instanceId": 42})
     )
+
+    # Garantir que o cliente HTTP é o mock
+    assert client.http_client is http_client_mock
     
     # Create test event for synchronization
     operation_complete = asyncio.Event()
