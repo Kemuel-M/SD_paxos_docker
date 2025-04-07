@@ -64,17 +64,28 @@ class PaxosClient:
         self.running = True
         logger.info(f"Iniciando ciclo de operações. Total planejado: {self.num_operations}")
         
-        # Agora retornamos a task criada em vez de apenas criá-la
-        loop_task = asyncio.create_task(self._operation_loop())
+        # Criar uma referência para a task para que possa ser gerenciada posteriormente
+        self._main_task = asyncio.create_task(self._operation_loop())
         
-        # Em produção, isso funciona normalmente
-        # Em testes, podemos aguardar ou cancelar esta task conforme necessário
-        return loop_task
+        # Adicionar à lista de tasks para cleanup
+        if not hasattr(self, '_tasks'):
+            self._tasks = []
+        self._tasks.append(self._main_task)
+        
+        return self._main_task
         
     async def stop(self):
         """Para o ciclo de operações do cliente."""
         logger.info("Parando cliente...")
         self.running = False
+
+        # Cancela a task principal se existir
+        if hasattr(self, '_main_task') and not self._main_task.done():
+            self._main_task.cancel()
+            try:
+                await self._main_task
+            except asyncio.CancelledError:
+                pass
 
         # Limpa todas as tasks pendentes
         await self.cleanup_pending_tasks()
@@ -313,24 +324,29 @@ class PaxosClient:
                 retry_delay = random.uniform(1.0, 3.0)
                 logger.info(f"Tentando novamente operação #{operation_id} após {retry_delay:.2f}s")
                 await asyncio.sleep(retry_delay)
+                
                 await self._send_operation(operation_id, retries + 1, timestamp_override)
 
     async def cleanup_pending_tasks(self):
         """Limpa todas as tasks pendentes criadas pelo cliente."""
-        if hasattr(self, '_cleanup_tasks'):
-            # Verifica se cada item é realmente uma Task antes de tentar cancelar
-            valid_tasks = []
-            for task in self._cleanup_tasks:
-                if hasattr(task, 'done') and callable(task.done):
-                    if not task.done():
+        task_lists = ['_cleanup_tasks', '_timeout_tasks']
+        if hasattr(self, '_tasks'):
+            task_lists.append('_tasks')
+            
+        for list_name in task_lists:
+            if hasattr(self, list_name):
+                tasks = getattr(self, list_name)
+                valid_tasks = []
+                
+                for task in tasks:
+                    if isinstance(task, asyncio.Task) and not task.done():
                         task.cancel()
-                    valid_tasks.append(task)
-            
-            # Aguarda apenas tasks válidas
-            if valid_tasks:
-                await asyncio.gather(*valid_tasks, return_exceptions=True)
-            
-            self._cleanup_tasks = []
+                        valid_tasks.append(task)
+                
+                if valid_tasks:
+                    await asyncio.gather(*valid_tasks, return_exceptions=True)
+                
+                setattr(self, list_name, [])
         
         # Mesmo tratamento para timeout_tasks
         if hasattr(self, '_timeout_tasks'):

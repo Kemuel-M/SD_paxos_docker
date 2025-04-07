@@ -147,24 +147,26 @@ async def test_send_operation_error_retry(client, mock_http_client):
         MagicMock(status_code=202, json=MagicMock(return_value={"instanceId": 42}))
     ]
     
-    # Patch mais específico no método que está criando as tasks
-    with patch.object(client, '_cleanup_request_id', AsyncMock()):
-        # Patch no asyncio.sleep para facilitar o teste
-        with patch('asyncio.sleep', AsyncMock()) as mock_sleep:
-            await client._send_operation(1)
-        
-        # Check that retry sleep was called
-        mock_sleep.assert_called_once()
-        
-        # Check that HTTP client was called twice
-        assert mock_http_client.post.call_count == 2
-        
-        # Check that operation was registered as in progress after retry
-        assert 42 in client.operations_in_progress
-        assert client.operations_in_progress[42]["id"] == 1
-        
-    # Limpa _cleanup_tasks antes do teardown para evitar o erro
-    client._cleanup_tasks = []
+    # Adicionar este patch para evitar a criação da coroutine não aguardada
+    with patch.object(client, '_operation_loop', AsyncMock(return_value=None)):
+        # Patch mais específico no método que está criando as tasks
+        with patch.object(client, '_cleanup_request_id', AsyncMock()):
+            # Patch no asyncio.sleep para facilitar o teste
+            with patch('asyncio.sleep', AsyncMock()) as mock_sleep:
+                await client._send_operation(1)
+            
+            # Check that retry sleep was called
+            mock_sleep.assert_called_once()
+            
+            # Check that HTTP client was called twice
+            assert mock_http_client.post.call_count == 2
+            
+            # Check that operation was registered as in progress after retry
+            assert 42 in client.operations_in_progress
+            assert client.operations_in_progress[42]["id"] == 1
+            
+        # Limpa _cleanup_tasks antes do teardown para evitar o erro
+        client._cleanup_tasks = []
 
 @pytest.mark.asyncio
 async def test_send_operation_max_retries(client, mock_http_client):
