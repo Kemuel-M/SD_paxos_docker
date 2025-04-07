@@ -114,17 +114,6 @@ def web_server(mock_client, mock_http_client):
     # Replace HTTP client
     server.http_client = mock_http_client
     
-    # Garantir que todos os métodos assíncronos sejam corretamente mockados
-    server._fetch_resource_data = AsyncMock(return_value={
-        "data": "Test resource data",
-        "version": 5,
-        "timestamp": int(time.time() * 1000),
-        "node_id": 1
-    })
-    
-    server._fetch_system_logs = AsyncMock(return_value=[])
-    server._fetch_system_logs_important = AsyncMock(return_value=[])
-    
     return server
 
 @pytest.fixture
