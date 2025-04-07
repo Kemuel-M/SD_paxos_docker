@@ -7,25 +7,23 @@ README.md
 __pycache__/
 
 
-
 # Proposer
-proposer/
+proposer/tests/
 scripts/run-tests-proposer.sh
 
 # Acceptor
-acceptor/
+acceptor/tests/
 scripts/run-tests-acceptor.sh
 
 # learner
-learner/
+learner/tests/
 scripts/run-tests-learner.sh
 
 # Client
-
+client/tests/
+run-tests-client.sh
+run-tests-client-old.sh
 
 # Cluster_Store
-cluster_store/
+cluster_store/tests/
 scripts/run-tests-cluster-store.sh
-
-# Extras
-docker-compose.yml

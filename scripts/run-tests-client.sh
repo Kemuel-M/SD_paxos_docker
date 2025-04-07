@@ -30,11 +30,13 @@ show_help() {
     echo -e "  ${GREEN}-a, --all${NC}        Executa todos os testes (padrão)"
     echo -e "  ${GREEN}-c, --coverage${NC}   Gera relatório de cobertura"
     echo -e "  ${GREEN}-v, --verbose${NC}    Modo detalhado"
-    echo -e "  ${GREEN}-d, --debug${NC}      Nível de debug para os testes (basic, advanced, trace)"
+    echo -e "  ${GREEN}-d, --debug${NC}      Nível de debug para os testes (basic, advanced, trace) [padrão: trace]"
+    echo -e "  ${GREEN}--no-verbose-logs${NC} Desativa logs verbosos externos (httpx, asyncio, etc.)"
     echo ""
     echo -e "Exemplos:"
     echo -e "  $0 -a -c -v             Executa todos os testes com cobertura e modo detalhado"
     echo -e "  $0 -u -d advanced       Executa testes unitários com debug avançado"
+    echo -e "  $0 -i                   Executa testes de integração com verbose-logs e debug trace (padrão)"
     exit 0
 }
 
@@ -44,6 +46,7 @@ RUN_INTEGRATION=true
 GENERATE_COVERAGE=false
 VERBOSE=true
 DEBUG_LEVEL="trace"
+VERBOSE_LOGS=true
 
 # Processa argumentos
 while [[ $# -gt 0 ]]; do
@@ -77,6 +80,10 @@ while [[ $# -gt 0 ]]; do
         -d|--debug)
             DEBUG_LEVEL="$2"
             shift 2
+            ;;
+        --no-verbose-logs)
+            VERBOSE_LOGS=false
+            shift
             ;;
         *)
             echo -e "${RED}Opção desconhecida: $1${NC}"
@@ -144,20 +151,28 @@ run_unit_tests() {
     
     cd $CLIENT_DIR
     
+    # Opções de debug para testes unitários 
+    # (só usamos --debug-level, verbose-logs é mais relevante para integração)
+    DEBUG_ARGS="--debug-level=$DEBUG_LEVEL"
+    
     if [ "$GENERATE_COVERAGE" = true ]; then
         # Executa com cobertura
         if [ "$VERBOSE" = true ]; then
-            PYTHONPATH=.:.. pytest -xvs tests/unit --cov=. --cov-report=term --cov-report=html:../$COVERAGE_DIR/unit
+            echo -e "${BLUE}Executando testes unitários com cobertura e modo verbose${NC}"
+            PYTHONPATH=.:.. pytest -xvs tests/unit $DEBUG_ARGS --cov=. --cov-report=term --cov-report=html:../$COVERAGE_DIR/unit
         else
-            PYTHONPATH=.:.. pytest -xvs tests/unit --cov=. --cov-report=html:../$COVERAGE_DIR/unit
+            echo -e "${BLUE}Executando testes unitários com cobertura${NC}"
+            PYTHONPATH=.:.. pytest -xvs tests/unit $DEBUG_ARGS --cov=. --cov-report=html:../$COVERAGE_DIR/unit
         fi
         UNIT_RESULT=$?
     else
         # Executa sem cobertura
         if [ "$VERBOSE" = true ]; then
-            PYTHONPATH=.:.. pytest -xvs tests/unit
+            echo -e "${BLUE}Executando testes unitários em modo verbose${NC}"
+            PYTHONPATH=.:.. pytest -xvs tests/unit $DEBUG_ARGS
         else
-            PYTHONPATH=.:.. pytest -xs tests/unit
+            echo -e "${BLUE}Executando testes unitários${NC}"
+            PYTHONPATH=.:.. pytest -xs tests/unit $DEBUG_ARGS
         fi
         UNIT_RESULT=$?
     fi
@@ -180,20 +195,38 @@ run_integration_tests() {
     
     cd $CLIENT_DIR
     
+    # Configura opções para testes de integração
+    # Sempre incluímos --debug-level
+    DEBUG_ARGS="--debug-level=$DEBUG_LEVEL"
+    
+    # Adiciona --verbose-logs conforme configuração
+    if [ "$VERBOSE_LOGS" = true ]; then
+        DEBUG_ARGS="$DEBUG_ARGS --verbose-logs"
+        echo -e "${BLUE}Logs verbosos ativados para módulos externos${NC}"
+    fi
+    
     if [ "$GENERATE_COVERAGE" = true ]; then
         # Executa com cobertura
         if [ "$VERBOSE" = true ]; then
-            PYTHONPATH=.:.. pytest -xvs tests/integration --cov=. --cov-report=term --cov-report=html:../$COVERAGE_DIR/integration
+            echo -e "${BLUE}Executando testes de integração com cobertura e modo verbose${NC}"
+            echo -e "${BLUE}Usando: $DEBUG_ARGS${NC}"
+            PYTHONPATH=.:.. pytest -xvs tests/integration $DEBUG_ARGS --cov=. --cov-report=term --cov-report=html:../$COVERAGE_DIR/integration
         else
-            PYTHONPATH=.:.. pytest -xvs tests/integration --cov=. --cov-report=html:../$COVERAGE_DIR/integration
+            echo -e "${BLUE}Executando testes de integração com cobertura${NC}"
+            echo -e "${BLUE}Usando: $DEBUG_ARGS${NC}"
+            PYTHONPATH=.:.. pytest -xvs tests/integration $DEBUG_ARGS --cov=. --cov-report=html:../$COVERAGE_DIR/integration
         fi
         INTEGRATION_RESULT=$?
     else
         # Executa sem cobertura
         if [ "$VERBOSE" = true ]; then
-            PYTHONPATH=.:.. pytest -xvs tests/integration
+            echo -e "${BLUE}Executando testes de integração em modo verbose${NC}"
+            echo -e "${BLUE}Usando: $DEBUG_ARGS${NC}"
+            PYTHONPATH=.:.. pytest -xvs tests/integration $DEBUG_ARGS
         else
-            PYTHONPATH=.:.. pytest -xs tests/integration
+            echo -e "${BLUE}Executando testes de integração${NC}"
+            echo -e "${BLUE}Usando: $DEBUG_ARGS${NC}"
+            PYTHONPATH=.:.. pytest -xs tests/integration $DEBUG_ARGS
         fi
         INTEGRATION_RESULT=$?
     fi
@@ -240,6 +273,7 @@ cleanup() {
 # ===== EXECUÇÃO PRINCIPAL =====
 
 echo -e "${BLUE}====== Iniciando Testes do Cliente ======${NC}"
+echo -e "${BLUE}Configurações: DEBUG_LEVEL=${DEBUG_LEVEL}, VERBOSE_LOGS=${VERBOSE_LOGS}${NC}"
 
 # Verifica dependências
 check_dependencies

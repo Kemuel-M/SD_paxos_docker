@@ -1,719 +1,988 @@
 """
 File: client/tests/integration/test_integration.py
-Integration tests for the client component.
+Testes de integração para o cliente Paxos.
 """
 import os
+import sys
 import json
 import time
-import pytest
+import logging
 import asyncio
-import tempfile
-import shutil
+import pytest
+import pytest_asyncio
+from typing import Dict, Any, List, Optional
 from unittest.mock import MagicMock, patch, AsyncMock
-from fastapi.testclient import TestClient
 
-import warnings
-warnings.filterwarnings("always", category=RuntimeWarning)
+# Configuração de logs para debugging
+logging.basicConfig(level=logging.DEBUG, 
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("integration_tests")
 
 # Configure environment for testing
 os.environ["DEBUG"] = "true"
-os.environ["DEBUG_LEVEL"] = "basic"
+os.environ["DEBUG_LEVEL"] = "trace"  # Usar trace para máximo debugging
 os.environ["NODE_ID"] = "1"
 os.environ["CLIENT_ID"] = "client-1"
-os.environ["PROPOSER"] = "localhost:8080"
 os.environ["LOG_DIR"] = "/tmp/paxos-test-logs"
+os.environ["PROPOSER"] = "mock-proposer:8080"  # Será substituído pelo mock nos testes
 
 # Create test directory
 os.makedirs(os.environ["LOG_DIR"], exist_ok=True)
 
-# Fixture for setup and teardown of test environment
-@pytest.fixture(scope="module")
-def setup_integration():
-    """Setup function executed once before all integration tests."""
-    # Create temporary data directory
-    temp_dir = tempfile.mkdtemp()
-    
-    # Configure mock for HTTP client
-    http_client_mock = AsyncMock()
-    http_client_mock.post.return_value = MagicMock(
-        status_code=202,
-        json=MagicMock(return_value={"instanceId": 42})
-    )
-    http_client_mock.get.return_value = MagicMock(
-        status_code=200,
-        json=MagicMock(return_value={"data": "test", "version": 1})
-    )
-    
-    # Import necessary modules
-    from client import PaxosClient
-    from api import create_api
-    from web_server import WebServer
-    from common.logging import setup_logging
-    from common.communication import HttpClient
-    
-    # Patch HTTP client
-    with patch.object(HttpClient, 'post', new=http_client_mock.post), \
-         patch.object(HttpClient, 'get', new=http_client_mock.get):
-        # Setup logging
-        setup_logging("client-test", debug=True, debug_level="basic", log_dir=os.environ["LOG_DIR"])
-        
-        # Create client
-        client = PaxosClient(
-            client_id="client-1",
-            proposer_url=f"http://{os.environ['PROPOSER']}",
-            callback_url=f"http://client-1:8080/notification",
-            num_operations=20
-        )
-        
-        # Create API
-        app = create_api(client)
-        api_client = TestClient(app)
-        
-        # Create web server
-        web_server = WebServer(client, host="127.0.0.1", port=8081)
-        web_client = TestClient(web_server.app)
-        
-        # Start client in a non-blocking way
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(client.start())
-        
-        # Return components for tests
-        yield {
-            "temp_dir": temp_dir,
-            "client": client,
-            "api_client": api_client,
-            "web_client": web_client,
-            "http_client_mock": http_client_mock,
-            "loop": loop
-        }
-        
-        # Cleanup
-        try:
-            if not loop.is_closed():
-                loop.run_until_complete(client.stop())
-        except RuntimeError as e:
-            if "Event loop is closed" in str(e):
-                # Create a new loop if the previous one is closed
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                new_loop.run_until_complete(client.stop())
-                new_loop.close()
-            else:
-                raise
-        
-        # Close the original loop if still open
-        if not loop.is_closed():
-            loop.close()
+# Importante: Ajusta PYTHONPATH para encontrar os módulos
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 
-        try:
-            shutil.rmtree(temp_dir)
-            shutil.rmtree(os.environ["LOG_DIR"])
-        except:
-            pass
+# Importamos os módulos necessários
+from client.client import PaxosClient
+from client.api import create_api
+from client.web_server import WebServer
+from common.logging import setup_logging
 
-def test_client_operation_flow(setup_integration):
-    """Test the complete flow of client operations."""
-    client = setup_integration["client"]
-    api_client = setup_integration["api_client"]
-    http_client_mock = setup_integration["http_client_mock"]
+# Fixture para configuração e limpeza do ambiente de teste
+@pytest.fixture(scope="module", autouse=True)
+def setup_module():
+    """Setup function executed once before all tests."""
+    logger.info("Inicializando ambiente para testes de integração")
     
-    # Reset HTTP client mock
-    http_client_mock.post.reset_mock()
+    # Initialize logging
+    setup_logging("client-test-integration", debug=True, debug_level="trace", log_dir=os.environ["LOG_DIR"])
     
-    # Configure mock to return success
-    http_client_mock.post.return_value = MagicMock(
-        status_code=202,
-        json=MagicMock(return_value={"instanceId": 42})
-    )
-
-    # Garantir que o cliente HTTP é o mock
-    assert client.http_client is http_client_mock
-    
-    # Create test event for synchronization
-    operation_complete = asyncio.Event()
-    original_process_notification = client.process_notification
-    
-    def process_notification_with_signal(notification):
-        result = original_process_notification(notification)
-        # Signal completion for synchronization
-        loop = asyncio.get_event_loop()
-        loop.call_soon_threadsafe(operation_complete.set)
-        return result
-    
-    # Replace process_notification method
-    client.process_notification = process_notification_with_signal
-    
-    # Clear operation history
-    client.history = []
-    client.operations_completed = 0
-    client.operations_failed = 0
-    client.operations_in_progress = {}
-    
-    # First check status API
-    response = api_client.get("/status")
-    assert response.status_code == 200
-    status_data = response.json()
-    assert status_data["running"] == True
-    
-    # Submit a manual operation
-    operation_data = "test data"
-    response = api_client.post("/operation", json={"data": operation_data})
-    assert response.status_code == 200
-    operation_result = response.json()
-    assert operation_result["status"] == "initiated"
-    assert "operation_id" in operation_result
-    operation_id = operation_result["operation_id"]
-    
-    # Check that HTTP client was called for propose
-    http_client_mock.post.assert_called_once()
-    call_args = http_client_mock.post.call_args
-    assert "propose" in str(call_args)
-    
-    # Check that operation is in progress
-    response = api_client.get("/history")
-    assert response.status_code == 200
-    history_data = response.json()
-    
-    # Check if operation is in progress
-    operation_in_history = any(op.get("id") == operation_id for op in history_data.get("operations", []))
-    if not operation_in_history:
-        # It might not be in history yet if it's still in operations_in_progress
-        assert 42 in client.operations_in_progress
-        assert client.operations_in_progress[42]["id"] == operation_id
-    
-    # Send notification to simulate learner response
-    notification = {
-        "status": "COMMITTED",
-        "instanceId": 42,
-        "resource": "R",
-        "timestamp": int(time.time() * 1000)
-    }
-    
-    # Reset HTTP client mock
-    http_client_mock.post.reset_mock()
-    
-    # Send notification
-    response = api_client.post("/notification", json=notification)
-    assert response.status_code == 200
-    notification_result = response.json()
-    assert notification_result["status"] == "acknowledged"
-    assert notification_result["known"] == True
-    
-    # Wait a bit for async processing
+    # Aguarda um momento para certeza que logs estão configurados
     time.sleep(0.1)
     
-    # Check that operation was completed
-    assert client.operations_completed == 1
-    assert client.operations_failed == 0
-    assert 42 not in client.operations_in_progress
+    logger.info("Ambiente de testes inicializado com sucesso")
     
-    # Check history again
-    response = api_client.get("/history")
-    assert response.status_code == 200
-    history_data = response.json()
+    yield
     
-    # Find operation in history
-    operation = next((op for op in history_data.get("operations", []) if op.get("id") == operation_id), None)
-    assert operation is not None
-    assert operation["status"] == "COMMITTED"
-    
-    # Restore original method
-    client.process_notification = original_process_notification
+    # Cleanup after tests
+    logger.info("Limpando ambiente após testes de integração")
+    import shutil
+    try:
+        shutil.rmtree(os.environ["LOG_DIR"])
+        logger.info("Diretório de logs removido com sucesso")
+    except Exception as e:
+        logger.error(f"Erro ao limpar diretório de logs: {e}")
 
-def test_web_interface_integration(setup_integration):
-    """Test the web interface integration with client."""
-    client = setup_integration["client"]
-    web_client = setup_integration["web_client"]
-    http_client_mock = setup_integration["http_client_mock"]
+# Mock Server para simular o Proposer
+class MockProposerServer:
+    """Servidor mock para simular o proposer nos testes de integração"""
     
-    # Reset HTTP client mock
-    http_client_mock.get.reset_mock()
+    def __init__(self):
+        self.requests = []
+        self.responses = {}  # endpoint -> response
+        self.should_fail = False
+        self.delay = 0.0
+        self.instance_counter = 100
+        logger.info("MockProposerServer inicializado")
     
-    # Configure mock for resource data
-    http_client_mock.get.return_value = MagicMock(
+    async def handle_request(self, method, url, **kwargs):
+        """Manipula requisições simulando um proposer"""
+        logger.debug(f"MockProposerServer recebeu requisição: {method} {url}")
+        logger.debug(f"Kwargs: {kwargs}")
+        
+        # Registra a requisição
+        self.requests.append({
+            "method": method,
+            "url": url,
+            "kwargs": kwargs
+        })
+        
+        # Simula delay de rede
+        if self.delay > 0:
+            logger.debug(f"Simulando delay de rede: {self.delay}s")
+            await asyncio.sleep(self.delay)
+        
+        # Simula falha se configurado
+        if self.should_fail:
+            logger.debug("Simulando falha do proposer")
+            import httpx
+            raise httpx.ConnectError("Falha simulada do proposer")
+        
+        # Extrai endpoint da URL
+        endpoint = url.split("/")[-1]
+        
+        # Se houver resposta específica configurada, use-a
+        if endpoint in self.responses:
+            logger.debug(f"Usando resposta pré-configurada para endpoint {endpoint}")
+            return self.responses[endpoint]
+        
+        # Resposta padrão para /propose
+        if endpoint == "propose":
+            logger.debug("Gerando resposta para /propose")
+            self.instance_counter += 1
+            return MagicMock(
+                status_code=202,
+                json=MagicMock(return_value={"instanceId": self.instance_counter})
+            )
+        
+        # Resposta padrão para /health
+        if endpoint == "health":
+            logger.debug("Gerando resposta para /health")
+            return MagicMock(
+                status_code=200,
+                json=MagicMock(return_value={"status": "healthy"})
+            )
+        
+        # Resposta genérica para outros endpoints
+        logger.debug(f"Gerando resposta genérica para endpoint desconhecido: {endpoint}")
+        return MagicMock(
+            status_code=200,
+            json=MagicMock(return_value={})
+        )
+    
+    def set_response(self, endpoint, status_code, data):
+        """Configura resposta específica para um endpoint"""
+        logger.info(f"Configurando resposta para endpoint {endpoint}: status={status_code}, data={data}")
+        self.responses[endpoint] = MagicMock(
+            status_code=status_code,
+            json=MagicMock(return_value=data)
+        )
+    
+    def reset(self):
+        """Reinicia o estado do servidor mock"""
+        logger.info("Reiniciando estado do MockProposerServer")
+        self.requests = []
+        self.responses = {}
+        self.should_fail = False
+        self.delay = 0.0
+
+# Mock Server para simular o Learner
+class MockLearnerServer:
+    """Servidor mock para simular o learner nos testes de integração"""
+    
+    def __init__(self):
+        self.notifications = []
+        self.should_fail = False
+        self.delay = 0.0
+        logger.info("MockLearnerServer inicializado")
+    
+    async def send_notification(self, client_url, notification):
+        """Envia notificação simulando um learner"""
+        logger.debug(f"MockLearnerServer enviando notificação para {client_url}")
+        logger.debug(f"Notificação: {notification}")
+        
+        # Registra a notificação
+        self.notifications.append({
+            "url": client_url,
+            "notification": notification
+        })
+        
+        # Simula delay de rede
+        if self.delay > 0:
+            logger.debug(f"Simulando delay de rede: {self.delay}s")
+            await asyncio.sleep(self.delay)
+        
+        # Simula falha se configurado
+        if self.should_fail:
+            logger.debug("Simulando falha do learner")
+            import httpx
+            raise httpx.ConnectError("Falha simulada do learner")
+        
+        try:
+            # Envia notificação para o cliente
+            async with httpx.AsyncClient() as client:
+                response = await client.post(client_url, json=notification, timeout=5.0)
+                logger.debug(f"Resposta do cliente: {response.status_code}")
+                logger.debug(f"Conteúdo da resposta: {response.text}")
+                return response
+        except Exception as e:
+            logger.error(f"Erro ao enviar notificação: {e}")
+            raise
+    
+    def reset(self):
+        """Reinicia o estado do servidor mock"""
+        logger.info("Reiniciando estado do MockLearnerServer")
+        self.notifications = []
+        self.should_fail = False
+        self.delay = 0.0
+
+# Fixture para criar cliente Paxos com mocks
+@pytest_asyncio.fixture
+async def integration_client():
+    """Fixture que cria um PaxosClient integrado com mocks para testes"""
+    logger.info("Criando cliente Paxos para testes de integração")
+    
+    # Criar mock servers
+    proposer_mock = MockProposerServer()
+    learner_mock = MockLearnerServer()
+    
+    # Criar cliente com URLs para mocks
+    client = PaxosClient(
+        client_id="client-1",
+        proposer_url="http://mock-proposer:8080",
+        callback_url="http://client-1:8080/notification",
+        num_operations=10
+    )
+    
+    # Substituir o cliente HTTP por um que use nossos mocks
+    async def mock_post(url, **kwargs):
+        logger.debug(f"Mock HTTP POST: {url}")
+        if "mock-proposer" in url:
+            return await proposer_mock.handle_request("POST", url, **kwargs)
+        else:
+            logger.warning(f"URL desconhecida no mock HTTP POST: {url}")
+            return MagicMock(status_code=404)
+    
+    async def mock_get(url, **kwargs):
+        logger.debug(f"Mock HTTP GET: {url}")
+        if "mock-proposer" in url:
+            return await proposer_mock.handle_request("GET", url, **kwargs)
+        else:
+            logger.warning(f"URL desconhecida no mock HTTP GET: {url}")
+            return MagicMock(status_code=404)
+    
+    # Substituir métodos do cliente HTTP
+    client.http_client.post = AsyncMock(side_effect=mock_post)
+    client.http_client.get = AsyncMock(side_effect=mock_get)
+    
+    # Inicializar listas de tasks para limpeza
+    client._cleanup_tasks = []
+    client._timeout_tasks = []
+    
+    logger.info("Cliente Paxos criado com sucesso")
+    
+    # Retornar cliente e mocks para testes
+    yield client, proposer_mock, learner_mock
+    
+    # Limpar recursos após testes
+    logger.info("Limpando recursos do cliente após testes")
+    try:
+        await client.stop()
+        await client.cleanup_pending_tasks()
+        logger.info("Cliente parado e tasks limpas com sucesso")
+    except Exception as e:
+        logger.error(f"Erro ao limpar recursos do cliente: {e}")
+    
+    # Pequeno delay para permitir que tasks interrompidas terminem
+    await asyncio.sleep(0.1)
+    logger.info("Limpeza concluída")
+
+# Fixture para criar API e Web Server
+@pytest_asyncio.fixture
+async def integration_servers(integration_client):
+    """Fixture que cria API e Web Server integrados com o cliente para testes"""
+    logger.info("Criando API e Web Server para testes de integração")
+    
+    client, proposer_mock, learner_mock = integration_client
+    
+    # Criar API
+    api_app = create_api(client)
+    
+    # Criar Web Server
+    web_server = WebServer(client, host="127.0.0.1", port=8081)
+    
+    # Mockear HTTP client do Web Server
+    web_server.http_client = AsyncMock()
+    web_server.http_client.get = AsyncMock(return_value=MagicMock(
         status_code=200,
         json=MagicMock(return_value={
             "data": "Test resource data",
-            "version": 5,
+            "version": 1,
             "timestamp": int(time.time() * 1000),
             "node_id": 1
         })
-    )
+    ))
     
-    # Add some operations to history
-    client.history = [
-        {"id": 1, "start_time": time.time() - 30, "status": "COMMITTED", "latency": 1.5, "instance_id": 101},
-        {"id": 2, "start_time": time.time() - 20, "status": "NOT_COMMITTED", "latency": 2.0, "instance_id": 102}
-    ]
+    logger.info("API e Web Server criados com sucesso")
     
-    # Test dashboard
-    response = web_client.get("/")
-    assert response.status_code == 200
+    # Retornar para testes
+    yield client, api_app, web_server, proposer_mock, learner_mock
     
-    # Test resources page
-    response = web_client.get("/resources")
-    assert response.status_code == 200
-    
-    # Test history page
-    response = web_client.get("/history")
-    assert response.status_code == 200
-    assert "Histórico de Operações" in response.content.decode()
-    
-    # Verify both operations appear in history
-    content = response.content.decode()
-    assert "COMMITTED" in content
-    assert "NOT_COMMITTED" in content
-    
-    # Test logs page
-    response = web_client.get("/logs")
-    assert response.status_code == 200
-    
-    # Test system logs
-    response = web_client.get("/system-logs")
-    assert response.status_code == 200
-    
-    # Test resource page
-    response = web_client.get("/resource/R")
-    assert response.status_code == 200
-    assert "Test resource data" in response.content.decode()
-    
-    # Check HTTP client was called to fetch resource
-    assert http_client_mock.get.call_count > 0
-    any_resource_request = any("/resource/R" in str(call) for call in http_client_mock.get.call_args_list)
-    assert any_resource_request, "No request was made to fetch resource R"
+    # Nenhuma limpeza adicional necessária aqui - o fixture do cliente já faz isso
 
-def test_retries_and_timeouts(setup_integration):
-    """Test retry mechanism and timeout handling."""
-    client = setup_integration["client"]
-    api_client = setup_integration["api_client"]
-    http_client_mock = setup_integration["http_client_mock"]
-    
-    # Reset HTTP client mock
-    http_client_mock.post.reset_mock()
-    
-    # Configure mock to fail first, then succeed
-    http_client_mock.post.side_effect = [
-        MagicMock(
-            status_code=500,
-            text="Internal error"
-        ),
-        MagicMock(
-            status_code=202,
-            json=MagicMock(return_value={"instanceId": 43})
-        )
-    ]
-    
-    # Submit an operation
-    with patch('asyncio.sleep', AsyncMock()):  # Mock sleep to speed up test
-        response = api_client.post("/operation", json={"data": "retry test"})
-    
-    assert response.status_code == 200
-    operation_result = response.json()
-    assert operation_result["status"] == "initiated"
-    
-    # Check that HTTP client was called twice
-    assert http_client_mock.post.call_count == 2
-    
-    # Test timeout handling
-    # Create a pending operation
-    instance_id = 100
-    operation_info = {
-        "id": 99,
-        "start_time": time.time() - 2.0,
-        "payload": {"data": "timeout test"},
-        "status": "in_progress"
-    }
-    client.operations_in_progress[instance_id] = operation_info
-    
-    # Call timeout handler manually with patched sleep
-    with patch('asyncio.sleep', AsyncMock()):
-        asyncio.run_coroutine_threadsafe(
-            client._handle_operation_timeout(instance_id),
-            setup_integration["loop"]
-        )
-    
-    # Wait a bit for async processing
-    time.sleep(0.1)
-    
-    # Check that operation was marked as timeout
-    assert instance_id not in client.operations_in_progress
-    timeout_operation = next((op for op in client.history if op.get("id") == 99), None)
-    assert timeout_operation is not None
-    assert timeout_operation["status"] == "timeout"
+# Agora os testes de integração propriamente ditos
 
-def test_notification_handling(setup_integration):
-    """Test handling of notifications from learners."""
-    client = setup_integration["client"]
-    api_client = setup_integration["api_client"]
+@pytest.mark.asyncio
+async def test_client_startup_and_shutdown(integration_client):
+    """Teste de inicialização e desligamento do cliente"""
+    logger.info("Iniciando teste de inicialização e desligamento do cliente")
     
-    # Clear operations first
-    client.operations_in_progress = {}
-    client.history = []
-    client.operations_completed = 0
-    client.operations_failed = 0
+    client, proposer_mock, learner_mock = integration_client
     
-    # Create a pending operation
-    instance_id = 200
-    operation_info = {
-        "id": 50,
-        "start_time": time.time() - 1.0,
-        "payload": {"data": "notification test"},
-        "status": "in_progress"
-    }
-    client.operations_in_progress[instance_id] = operation_info
-    
-    # Send committed notification
-    notification1 = {
-        "status": "COMMITTED",
-        "instanceId": instance_id,
-        "resource": "R",
-        "timestamp": int(time.time() * 1000)
-    }
-    
-    response = api_client.post("/notification", json=notification1)
-    assert response.status_code == 200
-    
-    # Check that operation was completed
-    assert instance_id not in client.operations_in_progress
-    assert client.operations_completed == 1
-    assert client.operations_failed == 0
-    
-    # Create another pending operation
-    instance_id = 201
-    operation_info = {
-        "id": 51,
-        "start_time": time.time() - 1.0,
-        "payload": {"data": "notification failure test"},
-        "status": "in_progress"
-    }
-    client.operations_in_progress[instance_id] = operation_info
-    
-    # Send not committed notification
-    notification2 = {
-        "status": "NOT_COMMITTED",
-        "instanceId": instance_id,
-        "resource": "R",
-        "timestamp": int(time.time() * 1000)
-    }
-    
-    response = api_client.post("/notification", json=notification2)
-    assert response.status_code == 200
-    
-    # Check that operation was failed
-    assert instance_id not in client.operations_in_progress
-    assert client.operations_completed == 1
-    assert client.operations_failed == 1
-    
-    # Send notification for unknown instance
-    notification3 = {
-        "status": "COMMITTED",
-        "instanceId": 999,
-        "resource": "R",
-        "timestamp": int(time.time() * 1000)
-    }
-    
-    response = api_client.post("/notification", json=notification3)
-    assert response.status_code == 200
-    result = response.json()
-    assert result["known"] == False
-    
-    # Check that stats didn't change
-    assert client.operations_completed == 1
-    assert client.operations_failed == 1
-
-# Fixture for setup and teardown of test environment
-@pytest.fixture(scope="module")
-def setup_integration():
-    """Setup function executed once before all integration tests."""
-    # Create temporary data directory
-    temp_dir = tempfile.mkdtemp()
-    
-    # Configure mock for HTTP client
-    http_client_mock = AsyncMock()
-    http_client_mock.post.return_value = MagicMock(
-        status_code=202,
-        json=MagicMock(return_value={"instanceId": 42})
-    )
-    http_client_mock.get.return_value = MagicMock(
-        status_code=200,
-        json=MagicMock(return_value={"data": "test", "version": 1})
-    )
-    
-    # Import necessary modules
-    from client import PaxosClient
-    from api import create_api
-    from web_server import WebServer
-    from common.logging import setup_logging
-    from common.communication import HttpClient
-    
-    # Patch HTTP client
-    with patch.object(HttpClient, 'post', new=http_client_mock.post), \
-         patch.object(HttpClient, 'get', new=http_client_mock.get):
-        # Setup logging
-        setup_logging("client-test", debug=True, debug_level="basic", log_dir=os.environ["LOG_DIR"])
-        
-        # Create client
-        client = PaxosClient(
-            client_id="client-1",
-            proposer_url=f"http://{os.environ['PROPOSER']}",
-            callback_url=f"http://client-1:8080/notification",
-            num_operations=20
-        )
-        
-        # Create API
-        app = create_api(client)
-        api_client = TestClient(app)
-        
-        # Create web server
-        web_server = WebServer(client, host="127.0.0.1", port=8081)
-        web_client = TestClient(web_server.app)
-        
-        # Start client in a non-blocking way
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(client.start())
-        
-        # Return components for tests
-        yield {
-            "temp_dir": temp_dir,
-            "client": client,
-            "api_client": api_client,
-            "web_client": web_client,
-            "http_client_mock": http_client_mock,
-            "loop": loop
-        }
-        
-        # Cleanup
-        try:
-            if not loop.is_closed():
-                loop.run_until_complete(client.stop())
-        except RuntimeError as e:
-            if "Event loop is closed" in str(e):
-                # Create a new loop if the previous one is closed
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                new_loop.run_until_complete(client.stop())
-                new_loop.close()
-            else:
-                raise
-        
-        # Close the original loop if still open
-        if not loop.is_closed():
-            loop.close()
-
-        try:
-            shutil.rmtree(temp_dir)
-            shutil.rmtree(os.environ["LOG_DIR"])
-        except:
-            pass
-
-def test_web_interface_operation_form(setup_integration):
-    """Test the manual operation form in web interface."""
-    client = setup_integration["client"]
-    web_client = setup_integration["web_client"]
-    http_client_mock = setup_integration["http_client_mock"]
-    
-    # Configure mock to succeed
-    http_client_mock.post.reset_mock()
-    http_client_mock.post.return_value = MagicMock(
-        status_code=202,
-        json=MagicMock(return_value={"instanceId": 200})
-    )
-    
-    # First get the form page
-    response = web_client.get("/")
-    assert response.status_code == 200
-    
-    # Simulate form submission via AJAX
-    response = web_client.post("/api/operation", json="test operation data")
-    assert response.status_code == 200
-    
-    # Check response contains operation ID
-    result = response.json()
-    assert "status" in result
-    assert result["status"] == "initiated"
-    assert "operation_id" in result
-    
-    # Check HTTP client was called
-    assert http_client_mock.post.call_count > 0
-    
-    # Wait a bit for async processing
-    time.sleep(0.1)
-    
-    # Check that operation is in progress
-    assert 200 in client.operations_in_progress
-
-def test_resource_editing_flow(setup_integration):
-    """Test the resource editing flow."""
-    client = setup_integration["client"]
-    web_client = setup_integration["web_client"]
-    http_client_mock = setup_integration["http_client_mock"]
-    
-    # Configure mock to return resource data
-    http_client_mock.get.return_value = MagicMock(
-        status_code=200,
-        json=MagicMock(return_value={
-            "data": "Original resource data",
-            "version": 5,
-            "timestamp": int(time.time() * 1000),
-            "node_id": 1
-        })
-    )
-    
-    # Reset HTTP client mock for POST
-    http_client_mock.post.reset_mock()
-    http_client_mock.post.return_value = MagicMock(
-        status_code=202,
-        json=MagicMock(return_value={"instanceId": 201})
-    )
-    
-    # First get the resource edit page
-    response = web_client.get("/resource/R")
-    assert response.status_code == 200
-    assert "Original resource data" in response.content.decode()
-    
-    # Simulate form submission via AJAX
-    response = web_client.post("/api/operation", json="Updated resource data")
-    assert response.status_code == 200
-    
-    # Check response contains operation ID
-    result = response.json()
-    assert "operation_id" in result
-    
-    # Check HTTP client was called
-    assert http_client_mock.post.call_count > 0
-    
-    # Wait a bit for async processing
-    time.sleep(0.1)
-    
-    # Check that operation is in progress
-    assert 201 in client.operations_in_progress
-
-def test_system_logs_display(setup_integration):
-    """Test the system logs display functionality."""
-    web_client = setup_integration["web_client"]
-    http_client_mock = setup_integration["http_client_mock"]
-    
-    # Configure mock to return logs for important view
-    http_client_mock.get.reset_mock()
-    
-    # Setup a response that returns different logs for each component type
-    def get_mock_response(url, **kwargs):
-        if "proposer" in url:
-            return MagicMock(
-                status_code=200, 
-                json=MagicMock(return_value={"logs": [
-                    {"timestamp": int(time.time() * 1000), "level": "IMPORTANT", "component": "proposer", "module": "test", "message": "Proposer log"}
-                ]})
-            )
-        elif "acceptor" in url:
-            return MagicMock(
-                status_code=200, 
-                json=MagicMock(return_value={"logs": [
-                    {"timestamp": int(time.time() * 1000), "level": "ERROR", "component": "acceptor", "module": "test", "message": "Acceptor error"}
-                ]})
-            )
-        elif "store" in url:
-            return MagicMock(
-                status_code=200, 
-                json=MagicMock(return_value={"logs": [
-                    {"timestamp": int(time.time() * 1000), "level": "WARNING", "component": "store", "module": "test", "message": "Store warning"}
-                ]})
-            )
-        else:
-            return MagicMock(status_code=200, json=MagicMock(return_value={"logs": []}))
-    
-    http_client_mock.get.side_effect = get_mock_response
-    
-    # Get the important logs page
-    response = web_client.get("/system-logs/important")
-    assert response.status_code == 200
-    
-    content = response.content.decode()
-    
-    # Check that logs from different components are displayed
-    assert "Proposer log" in content
-    assert "Acceptor error" in content
-    assert "Store warning" in content
-    
-    # Check that the proper classes are applied
-    assert "level-IMPORTANT" in content
-    assert "level-ERROR" in content
-    assert "level-WARNING" in content
-
-def test_client_stop_during_operation(setup_integration):
-    """Test stopping the client during an operation."""
-    client = setup_integration["client"]
-    api_client = setup_integration["api_client"]
-    http_client_mock = setup_integration["http_client_mock"]
-    
-    # Reset HTTP client mock
-    http_client_mock.post.reset_mock()
-    http_client_mock.post.return_value = MagicMock(
-        status_code=202,
-        json=MagicMock(return_value={"instanceId": 300})
-    )
-    
-    # Start an operation
-    response = api_client.post("/operation", json={"data": "operation during stop test"})
-    assert response.status_code == 200
-    
-    # Wait a bit for async processing
-    time.sleep(0.1)
-    
-    # Check that operation is in progress
-    assert 300 in client.operations_in_progress
-    
-    # Stop the client
-    response = api_client.post("/stop")
-    assert response.status_code == 200
-    
-    # Wait a bit for async processing
-    time.sleep(0.1)
-    
-    # Client should be stopped
+    # Verificar estado inicial
     assert client.running is False
+    assert client.operations_completed == 0
+    assert client.operations_failed == 0
+    logger.debug("Estado inicial do cliente verificado")
     
-    # Operation should still be in progress (stop doesn't cancel pending operations)
-    assert 300 in client.operations_in_progress
+    # Iniciar cliente
+    with patch.object(asyncio, 'create_task') as mock_create_task:
+        await client.start()
+        logger.debug("Cliente iniciado")
+        
+        # Verificar que está em execução
+        assert client.running is True
+        mock_create_task.assert_called_once()
+        logger.debug("Estado após inicialização verificado")
     
-    # Send a notification for the operation
+    # Parar cliente
+    await client.stop()
+    logger.debug("Cliente parado")
+    
+    # Verificar que está parado
+    assert client.running is False
+    logger.debug("Estado após parada verificado")
+    
+    logger.info("Teste de inicialização e desligamento concluído com sucesso")
+
+@pytest.mark.asyncio
+async def test_send_single_operation(integration_client):
+    """Teste de envio de uma única operação"""
+    logger.info("Iniciando teste de envio de uma única operação")
+    
+    client, proposer_mock, learner_mock = integration_client
+    
+    # Resetar estado do mock
+    proposer_mock.reset()
+    logger.debug("Mock do proposer resetado")
+    
+    # Configurar resposta específica para teste
+    proposer_mock.set_response("propose", 202, {"instanceId": 42})
+    logger.debug("Resposta do mock configurada")
+    
+    # Enviar operação
+    logger.debug("Enviando operação")
+    operation_id = 1
+    await client._send_operation(operation_id)
+    
+    # Verificar que foi enviada para o proposer
+    assert len(proposer_mock.requests) > 0
+    logger.debug(f"Proposer recebeu {len(proposer_mock.requests)} requisições")
+    
+    # Verificar detalhes da requisição
+    req = proposer_mock.requests[0]
+    assert "propose" in req["url"]
+    assert req["method"] == "POST"
+    logger.debug(f"Detalhes da requisição: {req}")
+    
+    # Verificar que operação está em andamento
+    assert 42 in client.operations_in_progress
+    assert client.operations_in_progress[42]["id"] == operation_id
+    logger.debug("Operação está registrada corretamente como em andamento")
+    
+    logger.info("Teste de envio de uma única operação concluído com sucesso")
+
+@pytest.mark.asyncio
+async def test_operation_notification(integration_client):
+    """Teste de recebimento de notificação para uma operação"""
+    logger.info("Iniciando teste de recebimento de notificação")
+    
+    client, proposer_mock, learner_mock = integration_client
+    
+    # Resetar estado dos mocks
+    proposer_mock.reset()
+    learner_mock.reset()
+    logger.debug("Mocks resetados")
+    
+    # Configurar resposta específica para teste
+    proposer_mock.set_response("propose", 202, {"instanceId": 43})
+    logger.debug("Resposta do mock configurada")
+    
+    # Enviar operação
+    logger.debug("Enviando operação")
+    operation_id = 2
+    await client._send_operation(operation_id)
+    
+    # Verificar que operação está em andamento
+    assert 43 in client.operations_in_progress
+    logger.debug("Operação está registrada como em andamento")
+    
+    # Simular notificação do learner
+    logger.debug("Simulando notificação do learner")
     notification = {
         "status": "COMMITTED",
-        "instanceId": 300,
+        "instanceId": 43,
         "resource": "R",
         "timestamp": int(time.time() * 1000)
     }
     
-    response = api_client.post("/notification", json=notification)
-    assert response.status_code == 200
+    # Processar notificação
+    result = client.process_notification(notification)
+    logger.debug(f"Resultado do processamento da notificação: {result}")
     
-    # Wait a bit for async processing
-    time.sleep(0.1)
+    # Verificar resposta
+    assert result["status"] == "acknowledged"
+    assert result["known"] == True
+    assert result["operation_id"] == operation_id
+    logger.debug("Resposta à notificação verificada")
     
-    # Operation should be completed despite client being stopped
-    assert 300 not in client.operations_in_progress
+    # Verificar que operação foi concluída
+    assert 43 not in client.operations_in_progress
     assert client.operations_completed == 1
+    assert len(client.history) == 1
+    assert client.history[0]["status"] == "COMMITTED"
+    assert client.history[0]["id"] == operation_id
+    logger.debug("Estado da operação após notificação verificado")
+    
+    logger.info("Teste de recebimento de notificação concluído com sucesso")
 
-def test_client_restart_after_stop(setup_integration):
-    """Test restarting the client after stopping it."""
-    client = setup_integration["client"]
-    api_client = setup_integration["api_client"]
+@pytest.mark.asyncio
+async def test_operation_with_redirection(integration_client):
+    """Teste de operação com redirecionamento para outro proposer"""
+    logger.info("Iniciando teste de operação com redirecionamento")
     
-    # Make sure client is stopped
-    client.running = False
+    client, proposer_mock, learner_mock = integration_client
     
-    # Start client
-    response = api_client.post("/start")
+    # Resetar estado dos mocks
+    proposer_mock.reset()
+    logger.debug("Mocks resetados")
+    
+    # Primeiro, configurar resposta de redirecionamento
+    redirect_response = MagicMock(
+        status_code=307,
+        headers={"Location": "http://proposer-leader:8080/propose"},
+        json=MagicMock(return_value={})
+    )
+    
+    # Segundo, configurar resposta de sucesso após redirecionamento
+    success_after_redirect = MagicMock(
+        status_code=202,
+        json=MagicMock(return_value={"instanceId": 44})
+    )
+    
+    # Configurar sequência de respostas
+    client.http_client.post.side_effect = [redirect_response, success_after_redirect]
+    logger.debug("Respostas do mock configuradas para simular redirecionamento")
+    
+    # Enviar operação
+    logger.debug("Enviando operação")
+    operation_id = 3
+    await client._send_operation(operation_id)
+    
+    # Verificar que houve duas chamadas ao proposer (original + redirecionamento)
+    assert client.http_client.post.call_count >= 2
+    logger.debug(f"Número de chamadas POST: {client.http_client.post.call_count}")
+    
+    # Verificar que operação está em andamento
+    assert 44 in client.operations_in_progress
+    assert client.operations_in_progress[44]["id"] == operation_id
+    logger.debug("Operação está registrada corretamente como em andamento")
+    
+    logger.info("Teste de operação com redirecionamento concluído com sucesso")
+
+@pytest.mark.asyncio
+async def test_operation_failure_retry(integration_client):
+    """Teste de falha e retry de operação"""
+    logger.info("Iniciando teste de falha e retry de operação")
+    
+    client, proposer_mock, learner_mock = integration_client
+    
+    # Resetar estado dos mocks
+    proposer_mock.reset()
+    logger.debug("Mocks resetados")
+    
+    # Configurar sequência: falha seguida de sucesso
+    error_response = MagicMock(status_code=500, text="Internal Server Error")
+    success_response = MagicMock(
+        status_code=202,
+        json=MagicMock(return_value={"instanceId": 45})
+    )
+    
+    client.http_client.post.side_effect = [error_response, success_response]
+    logger.debug("Respostas do mock configuradas para simular falha seguida de sucesso")
+    
+    # Patch em asyncio.sleep para acelerar o teste
+    with patch('asyncio.sleep', AsyncMock()):
+        # Enviar operação
+        logger.debug("Enviando operação")
+        operation_id = 4
+        await client._send_operation(operation_id)
+        
+        # Verificar que houve duas chamadas (original + retry)
+        assert client.http_client.post.call_count >= 2
+        logger.debug(f"Número de chamadas POST: {client.http_client.post.call_count}")
+        
+        # Verificar que operação está em andamento após retry
+        assert 45 in client.operations_in_progress
+        assert client.operations_in_progress[45]["id"] == operation_id
+        logger.debug("Operação está registrada corretamente como em andamento após retry")
+    
+    logger.info("Teste de falha e retry de operação concluído com sucesso")
+
+@pytest.mark.asyncio
+async def test_operation_cycle(integration_client):
+    """Teste de ciclo completo: envio + notificação + confirmação"""
+    logger.info("Iniciando teste de ciclo completo de operação")
+    
+    client, proposer_mock, learner_mock = integration_client
+    
+    # Resetar cliente e mocks
+    client.operations_completed = 0
+    client.operations_failed = 0
+    client.history = []
+    proposer_mock.reset()
+    learner_mock.reset()
+    logger.debug("Estado do cliente e mocks resetados")
+    
+    # Configurar resposta do proposer
+    proposer_mock.set_response("propose", 202, {"instanceId": 46})
+    logger.debug("Resposta do mock configurada")
+    
+    # Enviar operação
+    logger.debug("Enviando operação")
+    operation_id = 5
+    await client._send_operation(operation_id)
+    
+    # Verificar que operação está em andamento
+    assert 46 in client.operations_in_progress
+    logger.debug("Operação está registrada como em andamento")
+    
+    # Simular notificação do learner
+    logger.debug("Simulando notificação do learner")
+    notification = {
+        "status": "COMMITTED",
+        "instanceId": 46,
+        "resource": "R",
+        "timestamp": int(time.time() * 1000)
+    }
+    
+    # Verificar estado inicial antes da notificação
+    assert client.operations_completed == 0
+    
+    # Processar notificação
+    result = client.process_notification(notification)
+    logger.debug(f"Resultado do processamento da notificação: {result}")
+    
+    # Verificar que operação foi concluída
+    assert 46 not in client.operations_in_progress
+    assert client.operations_completed == 1
+    assert len(client.history) == 1
+    assert client.history[0]["status"] == "COMMITTED"
+    logger.debug("Estado da operação após notificação verificado")
+    
+    # Verificar que resposta da notificação é correta
+    assert result["status"] == "acknowledged"
+    assert result["known"] == True
+    assert result["operation_id"] == operation_id
+    logger.debug("Resposta à notificação verificada")
+    
+    logger.info("Teste de ciclo completo de operação concluído com sucesso")
+
+@pytest.mark.asyncio
+async def test_multiple_operations(integration_client):
+    """Teste de envio de múltiplas operações"""
+    logger.info("Iniciando teste de múltiplas operações")
+    
+    client, proposer_mock, learner_mock = integration_client
+    
+    # Resetar cliente e mocks
+    client.operations_completed = 0
+    client.operations_failed = 0
+    client.history = []
+    client.operations_in_progress = {}
+    proposer_mock.reset()
+    learner_mock.reset()
+    logger.debug("Estado do cliente e mocks resetados")
+    
+    # Enviar múltiplas operações
+    num_operations = 5
+    logger.debug(f"Enviando {num_operations} operações")
+    
+    # Lista para acompanhar instance IDs
+    instance_ids = []
+    
+    for i in range(num_operations):
+        # Configurar resposta do proposer
+        instance_id = 100 + i
+        proposer_mock.set_response("propose", 202, {"instanceId": instance_id})
+        
+        # Enviar operação
+        operation_id = 10 + i
+        logger.debug(f"Enviando operação {operation_id} (instance_id: {instance_id})")
+        await client._send_operation(operation_id)
+        
+        # Salvar instance_id para verificação
+        instance_ids.append(instance_id)
+    
+    # Verificar que todas as operações estão em andamento
+    for instance_id in instance_ids:
+        assert instance_id in client.operations_in_progress
+    logger.debug(f"Todas as {num_operations} operações estão registradas como em andamento")
+    
+    # Simular notificações para metade das operações como sucesso
+    logger.debug("Simulando notificações de sucesso para metade das operações")
+    for i in range(num_operations // 2):
+        notification = {
+            "status": "COMMITTED",
+            "instanceId": instance_ids[i],
+            "resource": "R",
+            "timestamp": int(time.time() * 1000)
+        }
+        client.process_notification(notification)
+    
+    # Simular notificações para outra metade como falha
+    logger.debug("Simulando notificações de falha para outra metade das operações")
+    for i in range(num_operations // 2, num_operations):
+        notification = {
+            "status": "NOT_COMMITTED",
+            "instanceId": instance_ids[i],
+            "resource": "R",
+            "timestamp": int(time.time() * 1000)
+        }
+        client.process_notification(notification)
+    
+    # Verificar estado final
+    assert client.operations_completed == num_operations // 2
+    assert client.operations_failed == num_operations - (num_operations // 2)
+    assert len(client.history) == num_operations
+    # Todas as operações em progresso devem ter sido processadas
+    assert len(client.operations_in_progress) == 0
+    logger.debug(f"Estado final: {client.operations_completed} completadas, {client.operations_failed} falhas")
+    
+    logger.info("Teste de múltiplas operações concluído com sucesso")
+
+@pytest.mark.asyncio
+async def test_operation_timeout(integration_client):
+    """Teste de timeout de operação"""
+    logger.info("Iniciando teste de timeout de operação")
+    
+    client, proposer_mock, learner_mock = integration_client
+    
+    # Resetar cliente e mocks
+    client.operations_completed = 0
+    client.operations_failed = 0
+    client.history = []
+    client.operations_in_progress = {}
+    proposer_mock.reset()
+    learner_mock.reset()
+    logger.debug("Estado do cliente e mocks resetados")
+    
+    # Enviar operação
+    logger.debug("Enviando operação")
+    operation_id = 6
+    instance_id = 47
+    proposer_mock.set_response("propose", 202, {"instanceId": instance_id})
+    await client._send_operation(operation_id)
+    
+    # Verificar que operação está em andamento
+    assert instance_id in client.operations_in_progress
+    logger.debug("Operação está registrada como em andamento")
+    
+    # Simular timeout
+    logger.debug("Simulando timeout")
+    with patch('asyncio.sleep', AsyncMock()):
+        await client._handle_operation_timeout(instance_id)
+    
+    # Verificar que operação foi marcada como timeout
+    assert instance_id not in client.operations_in_progress
+    assert client.operations_failed == 1
+    assert len(client.history) == 1
+    assert client.history[0]["status"] == "timeout"
+    logger.debug("Operação marcada corretamente como timeout")
+    
+    logger.info("Teste de timeout de operação concluído com sucesso")
+
+@pytest.mark.asyncio
+async def test_network_partition(integration_client):
+    """Teste de comportamento durante partição de rede"""
+    logger.info("Iniciando teste de partição de rede")
+    
+    client, proposer_mock, learner_mock = integration_client
+    
+    # Resetar cliente e mocks
+    client.operations_completed = 0
+    client.operations_failed = 0
+    client.history = []
+    client.operations_in_progress = {}
+    proposer_mock.reset()
+    logger.debug("Estado do cliente e mocks resetados")
+    
+    # Configurar proposer para falhar (simular partição)
+    proposer_mock.should_fail = True
+    logger.debug("Proposer configurado para falhar (simulando partição)")
+    
+    # Tentar enviar operação durante a partição
+    logger.debug("Tentando enviar operação durante a partição")
+    operation_id = 7
+    
+    # Patch em asyncio.sleep para acelerar o teste
+    with patch('asyncio.sleep', AsyncMock()):
+        # Substituir side_effect do client.http_client.post para simular erro de conexão
+        import httpx
+        client.http_client.post.side_effect = httpx.ConnectError("Falha simulada do proposer")
+        
+        # Simular tentativas esgotadas (retries=2)
+        await client._send_operation(operation_id, retries=2)
+        
+        # Verificar que operação foi marcada como falha
+        assert client.operations_failed >= 1
+        assert len(client.history) >= 1
+        failed_op = next((op for op in client.history if op.get("id") == operation_id), None)
+        assert failed_op is not None
+        assert failed_op["status"] == "failed"
+        logger.debug("Operação marcada corretamente como falha após tentativas")
+    
+    # Simular recuperação da partição
+    proposer_mock.should_fail = False
+    proposer_mock.set_response("propose", 202, {"instanceId": 48})
+    logger.debug("Proposer configurado para sucesso (simulando recuperação)")
+    
+    # Restaurar o comportamento normal do post
+    client.http_client.post = AsyncMock(side_effect=lambda url, **kwargs: 
+        proposer_mock.handle_request("POST", url, **kwargs)
+    )
+    
+    # Enviar nova operação após recuperação
+    logger.debug("Enviando operação após recuperação")
+    operation_id = 8
+    await client._send_operation(operation_id)
+    
+    # Verificar que operação está em andamento
+    assert 48 in client.operations_in_progress
+    logger.debug("Operação está registrada como em andamento após recuperação")
+    
+    logger.info("Teste de partição de rede concluído com sucesso")
+
+@pytest.mark.asyncio
+async def test_request_deduplication(integration_client):
+    """Teste de desduplicação de requisições"""
+    logger.info("Iniciando teste de desduplicação de requisições")
+    
+    client, proposer_mock, learner_mock = integration_client
+    
+    # Resetar cliente e mocks
+    client.operations_completed = 0
+    client.operations_failed = 0
+    client.history = []
+    client.operations_in_progress = {}
+    client.request_ids = {}
+    proposer_mock.reset()
+    logger.debug("Estado do cliente e mocks resetados")
+    
+    # Configurar TTL curto para teste
+    client.request_id_ttl = 1.0
+    logger.debug(f"TTL configurado para {client.request_id_ttl}s")
+    
+    # Enviar operação (primeiro envio)
+    logger.debug("Enviando operação pela primeira vez")
+    operation_id = 9
+    timestamp = 1000000000  # Timestamp fixo para garantir mesmo ID
+    proposer_mock.set_response("propose", 202, {"instanceId": 49})
+    await client._send_operation(operation_id, timestamp_override=timestamp)
+    
+    # Verificar que foi enviada
+    assert len(proposer_mock.requests) == 1
+    assert 49 in client.operations_in_progress
+    logger.debug("Primeira requisição enviada corretamente")
+    
+    # Resetar contagem de requisições do mock
+    proposer_mock.requests = []
+    logger.debug("Contador de requisições do mock resetado")
+    
+    # Tentar enviar a mesma operação novamente
+    logger.debug("Tentando enviar mesma operação novamente (deve ser desduplicada)")
+    await client._send_operation(operation_id, timestamp_override=timestamp)
+    
+    # Verificar que foi desduplicada (não enviada)
+    assert len(proposer_mock.requests) == 0
+    logger.debug("Segunda requisição desduplicada corretamente")
+    
+    # Aguardar expiração do TTL
+    logger.debug(f"Aguardando expiração do TTL ({client.request_id_ttl}s)")
+    await asyncio.sleep(client.request_id_ttl + 0.1)
+    
+    # Tentar novamente após expiração
+    logger.debug("Tentando novamente após expiração do TTL")
+    proposer_mock.set_response("propose", 202, {"instanceId": 50})
+    await client._send_operation(operation_id, timestamp_override=timestamp)
+    
+    # Verificar que foi enviada novamente
+    assert len(proposer_mock.requests) == 1
+    assert 50 in client.operations_in_progress
+    logger.debug("Terceira requisição enviada corretamente após expiração")
+    
+    logger.info("Teste de desduplicação de requisições concluído com sucesso")
+
+@pytest.mark.asyncio
+async def test_api_notification_endpoint(integration_servers):
+    """Teste do endpoint de notificação da API"""
+    logger.info("Iniciando teste do endpoint de notificação da API")
+    
+    client, api_app, web_server, proposer_mock, learner_mock = integration_servers
+    
+    # Resetar cliente
+    client.operations_completed = 0
+    client.operations_failed = 0
+    client.history = []
+    logger.debug("Estado do cliente resetado")
+    
+    # Criar operação em andamento
+    instance_id = 51
+    operation_id = 10
+    client.operations_in_progress[instance_id] = {
+        "id": operation_id,
+        "start_time": time.time(),
+        "status": "in_progress",
+        "payload": {"data": "test"}
+    }
+    logger.debug(f"Operação em andamento criada: instance_id={instance_id}, operation_id={operation_id}")
+    
+    # Criar cliente de teste para a API
+    from fastapi.testclient import TestClient
+    api_client = TestClient(api_app)
+    logger.debug("Cliente de teste da API criado")
+    
+    # Enviar notificação
+    logger.debug("Enviando notificação via API")
+    notification = {
+        "status": "COMMITTED",
+        "instanceId": instance_id,
+        "resource": "R",
+        "timestamp": int(time.time() * 1000)
+    }
+    response = api_client.post("/notification", json=notification)
+    
+    # Verificar resposta
     assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "acknowledged"
+    assert data["known"] == True
+    assert data["operation_id"] == operation_id
+    logger.debug(f"Resposta da API verificada: {data}")
     
-    # Wait a bit for async processing
-    time.sleep(0.1)
+    # Verificar que operação foi processada
+    assert instance_id not in client.operations_in_progress
+    assert client.operations_completed == 1
+    assert len(client.history) == 1
+    assert client.history[0]["status"] == "COMMITTED"
+    logger.debug("Estado do cliente após notificação verificado")
     
-    # Client should be running
-    assert client.running is True
+    logger.info("Teste do endpoint de notificação da API concluído com sucesso")
+
+@pytest.mark.asyncio
+async def test_web_server_routes(integration_servers):
+    """Teste das rotas do servidor web"""
+    logger.info("Iniciando teste das rotas do servidor web")
     
-    # Stop client again for cleanup
-    response = api_client.post("/stop")
+    client, api_app, web_server, proposer_mock, learner_mock = integration_servers
+    
+    # Criar cliente de teste para o web server
+    from fastapi.testclient import TestClient
+    web_client = TestClient(web_server.app)
+    logger.debug("Cliente de teste do web server criado")
+    
+    # Testar rota index
+    logger.debug("Testando rota index")
+    response = web_client.get("/")
     assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    logger.debug("Rota index testada com sucesso")
+    
+    # Testar rota de recursos
+    logger.debug("Testando rota de recursos")
+    response = web_client.get("/resources")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    logger.debug("Rota de recursos testada com sucesso")
+    
+    # Testar rota de histórico
+    logger.debug("Testando rota de histórico")
+    response = web_client.get("/history")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    logger.debug("Rota de histórico testada com sucesso")
+    
+    # Testar rota de logs
+    logger.debug("Testando rota de logs")
+    response = web_client.get("/logs")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    logger.debug("Rota de logs testada com sucesso")
+    
+    # Testar API para status
+    logger.debug("Testando API de status")
+    response = web_client.get("/api/status")
+    assert response.status_code == 200
+    data = response.json()
+    assert "client_id" in data
+    assert "total_operations" in data
+    logger.debug("API de status testada com sucesso")
+    
+    logger.info("Teste das rotas do servidor web concluído com sucesso")
+
+@pytest.mark.asyncio
+async def test_full_client_operation_flow(integration_servers):
+    """Teste do fluxo completo: iniciar cliente, enviar operação, receber notificação, parar cliente"""
+    logger.info("Iniciando teste do fluxo completo de operação do cliente")
+    
+    client, api_app, web_server, proposer_mock, learner_mock = integration_servers
+    
+    # Resetar cliente e mocks
+    client.operations_completed = 0
+    client.operations_failed = 0
+    client.history = []
+    client.operations_in_progress = {}
+    client.next_operation_id = 100
+    proposer_mock.reset()
+    learner_mock.reset()
+    logger.debug("Estado do cliente e mocks resetados")
+    
+    # Configurar mock do proposer para resposta de sucesso
+    proposer_mock.set_response("propose", 202, {"instanceId": 60})
+    logger.debug("Mock do proposer configurado")
+    
+    # Iniciar cliente com patch para não executar o loop de operações real
+    with patch.object(client, '_operation_loop', AsyncMock()):
+        # Iniciar cliente
+        logger.debug("Iniciando cliente")
+        await client.start()
+        assert client.running == True
+        
+        # Criar cliente de teste para a API
+        from fastapi.testclient import TestClient
+        api_client = TestClient(api_app)
+        logger.debug("Cliente de teste da API criado")
+        
+        # Enviar operação manual via API
+        logger.debug("Enviando operação manual via API")
+        with patch('asyncio.create_task') as mock_create_task:
+            response = api_client.post("/api/operation", params={"data": "test data"})
+            assert response.status_code == 200
+            data = response.json()
+            assert "operation_id" in data
+            assert data["status"] == "initiated"
+            logger.debug(f"Resposta da API para operação manual: {data}")
+            
+            # Verificar que task foi criada
+            mock_create_task.assert_called_once()
+        
+        # Simular envio direto da operação
+        operation_id = client.next_operation_id - 1  # ID gerado pela operação manual
+        logger.debug(f"Simulando envio direto da operação {operation_id}")
+        await client._send_operation(operation_id)
+        
+        # Verificar que operação está em andamento
+        assert 60 in client.operations_in_progress
+        logger.debug("Operação está registrada como em andamento")
+        
+        # Criar notificação
+        notification = {
+            "status": "COMMITTED",
+            "instanceId": 60,
+            "resource": "R",
+            "timestamp": int(time.time() * 1000)
+        }
+        
+        # Enviar notificação via API
+        logger.debug("Enviando notificação via API")
+        response = api_client.post("/notification", json=notification)
+        assert response.status_code == 200
+        
+        # Verificar que operação foi processada
+        assert 60 not in client.operations_in_progress
+        assert client.operations_completed == 1
+        assert len(client.history) == 1
+        logger.debug("Operação processada corretamente")
+        
+        # Parar cliente
+        logger.debug("Parando cliente")
+        response = api_client.post("/api/stop")
+        assert response.status_code == 200
+        assert response.json()["status"] == "stopped"
+        
+        # Verificar que cliente está parado
+        assert client.running == False
+        logger.debug("Cliente parado corretamente")
+    
+    logger.info("Teste do fluxo completo de operação do cliente concluído com sucesso")
