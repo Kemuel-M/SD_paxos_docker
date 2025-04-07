@@ -42,8 +42,8 @@ show_help() {
 RUN_UNIT=true
 RUN_INTEGRATION=true
 GENERATE_COVERAGE=false
-VERBOSE=false
-DEBUG_LEVEL="basic"
+VERBOSE=true
+DEBUG_LEVEL="trace"
 
 # Processa argumentos
 while [[ $# -gt 0 ]]; do
