@@ -121,8 +121,10 @@ async def test_send_operation_redirect(client, mock_http_client):
         )
     ]
     
-    # Send operation
-    await client._send_operation(1)
+    # Usar patch para evitar que _operation_loop seja chamado como efeito colateral
+    with patch.object(client, '_operation_loop', AsyncMock(return_value=None)):
+        # Send operation
+        await client._send_operation(1)
     
     # Check that HTTP client was called twice
     assert mock_http_client.post.call_count == 2

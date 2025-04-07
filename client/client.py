@@ -117,6 +117,7 @@ class PaxosClient:
         Args:
             operation_id: ID da operação (usado apenas localmente)
             retries: Número de tentativas realizadas
+            timestamp_override: Timestamp opcional para testes
         """
         try:
             # Gera dados da operação
@@ -136,7 +137,6 @@ class PaxosClient:
             
             # Agenda limpeza do ID de requisição após TTL
             cleanup_task = asyncio.create_task(self._cleanup_request_id(request_id))
-            # Armazenar referência da task para cancelamento posterior
             if not hasattr(self, '_cleanup_tasks'):
                 self._cleanup_tasks = []
             self._cleanup_tasks.append(cleanup_task)
@@ -160,7 +160,7 @@ class PaxosClient:
                 "status": "in_progress"
             }
             
-            logger.info(f"Enviando operação #{operation_id} para o proposer: WRITE em R")
+            logger.info(f"Enviando operação #{operation_id} para o proposer: WRITE em {self.resource_id}")
             if retries > 0:
                 logger.info(f"Esta é a tentativa #{retries+1} para operação #{operation_id}")
             
@@ -191,7 +191,10 @@ class PaxosClient:
                 self.operations_in_progress[instance_id] = operation_info
                 
                 # Configura timeout para o caso de não receber notificação
-                asyncio.create_task(self._handle_operation_timeout(instance_id))
+                timeout_task = asyncio.create_task(self._handle_operation_timeout(instance_id))
+                if not hasattr(self, '_timeout_tasks'):
+                    self._timeout_tasks = []
+                self._timeout_tasks.append(timeout_task)
                 
             elif response.status_code == 307:  # Redirect
                 # Redirecionamento para outro proposer (provavelmente o líder)
@@ -250,7 +253,10 @@ class PaxosClient:
                     self.operations_in_progress[instance_id] = operation_info
                     
                     # Configura timeout para o caso de não receber notificação
-                    asyncio.create_task(self._handle_operation_timeout(instance_id))
+                    timeout_task = asyncio.create_task(self._handle_operation_timeout(instance_id))
+                    if not hasattr(self, '_timeout_tasks'):
+                        self._timeout_tasks = []
+                    self._timeout_tasks.append(timeout_task)
                 else:
                     logger.error(f"Falha após redirecionamento para operação #{operation_id}: {response.status_code}")
                     logger.debug(f"Resposta: {response.text}")
@@ -267,7 +273,7 @@ class PaxosClient:
                         retry_delay = random.uniform(1.0, 3.0)
                         logger.info(f"Tentando novamente operação #{operation_id} após {retry_delay:.2f}s")
                         await asyncio.sleep(retry_delay)
-                        await self._send_operation(operation_id, retries + 1)
+                        await self._send_operation(operation_id, retries + 1, timestamp_override)
             
             else:
                 logger.error(f"Erro ao enviar operação #{operation_id}: {response.status_code}")
@@ -285,7 +291,7 @@ class PaxosClient:
                     retry_delay = random.uniform(1.0, 3.0)
                     logger.info(f"Tentando novamente operação #{operation_id} após {retry_delay:.2f}s")
                     await asyncio.sleep(retry_delay)
-                    await self._send_operation(operation_id, retries + 1)
+                    await self._send_operation(operation_id, retries + 1, timestamp_override)
         
         except Exception as e:
             logger.error(f"Exceção ao enviar operação #{operation_id}: {e}", exc_info=True)
@@ -307,7 +313,7 @@ class PaxosClient:
                 retry_delay = random.uniform(1.0, 3.0)
                 logger.info(f"Tentando novamente operação #{operation_id} após {retry_delay:.2f}s")
                 await asyncio.sleep(retry_delay)
-                await self._send_operation(operation_id, retries + 1)
+                await self._send_operation(operation_id, retries + 1, timestamp_override)
 
     async def cleanup_pending_tasks(self):
         """Limpa todas as tasks pendentes criadas pelo cliente."""
