@@ -125,8 +125,7 @@ def web_client(web_server):
 async def test_index_route(web_client, mock_client):
     """Test the index route."""
     # Adicionar este patch para evitar a criação da coroutine não aguardada
-    with patch.object(mock_client, '_operation_loop', AsyncMock(return_value=None)):
-        # Send request
+    with patch.object(mock_client, '_operation_loop', MagicMock()):  # Usar MagicMock em vez de AsyncMock
         response = web_client.get("/")
         
         # Check response
