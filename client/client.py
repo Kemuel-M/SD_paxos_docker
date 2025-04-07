@@ -78,7 +78,7 @@ class PaxosClient:
 
         # Limpa todas as tasks pendentes
         await self.cleanup_pending_tasks()
-        
+
         await self.http_client.aclose()
         logger.info("Cliente parado")
         
@@ -124,7 +124,7 @@ class PaxosClient:
             data = f"Data {self.client_id}-{operation_id} at {timestamp}"
 
             # Cria ID de requisição para desduplicação
-            request_id = f"{self.client_id}-{operation_id}"
+            request_id = f"{self.client_id}-{operation_id}-{retries}"
             
             # Verifica se é uma requisição duplicada
             if request_id in self.request_ids:
