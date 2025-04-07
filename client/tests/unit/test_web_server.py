@@ -124,22 +124,24 @@ def web_client(web_server):
 @pytest.mark.asyncio
 async def test_index_route(web_client, mock_client):
     """Test the index route."""
-    # Usar patch para evitar que _operation_loop seja chamado indiretamente
-    with patch.object(mock_client, '_operation_loop', AsyncMock(return_value=None)):
-        # Send request
-        response = web_client.get("/")
-        
-        # Check response
-        assert response.status_code == 200
-        assert "text/html" in response.headers["content-type"]
-        
-        # Check content
-        content = response.content.decode()
-        assert "client-1" in content
-        
-        # Check if client method was called
-        mock_client.get_status.assert_called_once()
-        mock_client.get_history.assert_called_once()
+    # Send request
+    response = web_client.get("/")
+    
+    # Check response
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    
+    # Check content
+    content = response.content.decode()
+    assert "client-1" in content
+    
+    # Check if client method was called
+    mock_client.get_status.assert_called_once()
+    mock_client.get_history.assert_called_once()
+    
+    # Limpar qualquer task pendente
+    if hasattr(mock_client, '_cleanup_tasks'):
+        mock_client._cleanup_tasks = []
 
 def test_resources_route(web_client, mock_http_client):
     """Test the resources route."""

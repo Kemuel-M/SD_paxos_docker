@@ -318,22 +318,32 @@ class PaxosClient:
     async def cleanup_pending_tasks(self):
         """Limpa todas as tasks pendentes criadas pelo cliente."""
         if hasattr(self, '_cleanup_tasks'):
+            # Verifica se cada item é realmente uma Task antes de tentar cancelar
+            valid_tasks = []
             for task in self._cleanup_tasks:
-                if not task.done():
-                    task.cancel()
+                if hasattr(task, 'done') and callable(task.done):
+                    if not task.done():
+                        task.cancel()
+                    valid_tasks.append(task)
             
-            # Aguarda o cancelamento de todas as tasks
-            await asyncio.gather(*[t for t in self._cleanup_tasks], return_exceptions=True)
+            # Aguarda apenas tasks válidas
+            if valid_tasks:
+                await asyncio.gather(*valid_tasks, return_exceptions=True)
+            
             self._cleanup_tasks = []
         
-        # Também limpa tasks de timeout
+        # Mesmo tratamento para timeout_tasks
         if hasattr(self, '_timeout_tasks'):
+            valid_tasks = []
             for task in self._timeout_tasks:
-                if not task.done():
-                    task.cancel()
+                if hasattr(task, 'done') and callable(task.done):
+                    if not task.done():
+                        task.cancel()
+                    valid_tasks.append(task)
             
-            # Aguarda o cancelamento de todas as tasks
-            await asyncio.gather(*[t for t in self._timeout_tasks], return_exceptions=True)
+            if valid_tasks:
+                await asyncio.gather(*valid_tasks, return_exceptions=True)
+            
             self._timeout_tasks = []
 
     # Método para limpar IDs de requisição antigos
