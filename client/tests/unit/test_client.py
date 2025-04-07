@@ -179,9 +179,11 @@ async def test_send_operation_max_retries(client, mock_http_client):
         text="Internal error"
     )
     
-    # Send operation with retry limit
-    with patch('asyncio.sleep', AsyncMock()):
-        await client._send_operation(1, retries=2)  # Already at max retries
+    # Usar patch para evitar que _operation_loop seja chamado como efeito colateral
+    with patch.object(client, '_operation_loop', AsyncMock(return_value=None)):
+        # Send operation with retry limit
+        with patch('asyncio.sleep', AsyncMock()):
+            await client._send_operation(1, retries=2)  # Already at max retries
     
     # Check that operation was marked as failed
     assert client.operations_failed == 1
