@@ -285,7 +285,7 @@ class PaxosClient:
                     "id": operation_id,
                     "start_time": time.time(),
                     "status": "failed",
-                    "error": str(e),
+                    "error": f"{type(e).__name__}: {str(e)}",
                     "retries": retries
                 }
                 self.operations_failed += 1
