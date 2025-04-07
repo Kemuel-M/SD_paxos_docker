@@ -63,6 +63,12 @@ def mock_client():
         {"id": 2, "start_time": time.time(), "instance_id": 102, "status": "NOT_COMMITTED", "latency": 2.0}
     ])
     
+    # Configurar corretamente os métodos assíncronos
+    client.start = AsyncMock()
+    client.stop = AsyncMock()
+    # Importante: não criar o _operation_loop diretamente como um atributo
+    client._send_operation = AsyncMock()
+    
     client.client_id = "client-1"
     
     return client
@@ -108,6 +114,17 @@ def web_server(mock_client, mock_http_client):
     # Replace HTTP client
     server.http_client = mock_http_client
     
+    # Garantir que todos os métodos assíncronos sejam corretamente mockados
+    server._fetch_resource_data = AsyncMock(return_value={
+        "data": "Test resource data",
+        "version": 5,
+        "timestamp": int(time.time() * 1000),
+        "node_id": 1
+    })
+    
+    server._fetch_system_logs = AsyncMock(return_value=[])
+    server._fetch_system_logs_important = AsyncMock(return_value=[])
+    
     return server
 
 @pytest.fixture
@@ -144,9 +161,9 @@ def test_resources_route(web_client, mock_http_client):
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     
-    # Check content
+    # Check content - corrigido para procurar por "Recursos" (português) em vez de "Resources"
     content = response.content.decode()
-    assert "Resources" in content
+    assert "Recursos" in content
     
     # Check if HTTP client method was called
     assert mock_http_client.get.call_count >= 1

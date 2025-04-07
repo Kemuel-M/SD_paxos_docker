@@ -34,8 +34,8 @@ def mock_http_client():
     return mock
 
 @pytest.fixture
-def client(mock_http_client):
-    """Fixture that creates a PaxosClient for tests."""
+async def client(mock_http_client):
+    """Fixture que cria um PaxosClient para testes."""
     client = PaxosClient(
         client_id="client-1",
         proposer_url="http://proposer-1:8080",
@@ -43,10 +43,15 @@ def client(mock_http_client):
         num_operations=20
     )
     
-    # Replace HTTP client with a mock
+    # Substitui HTTP client com um mock
     client.http_client = mock_http_client
+    client._cleanup_tasks = []
+    client._timeout_tasks = []
     
-    return client
+    yield client
+    
+    # Limpa recursos ao final
+    await client.cleanup_pending_tasks()
 
 @pytest.mark.asyncio
 async def test_client_initialization(client):
@@ -145,19 +150,21 @@ async def test_send_operation_error_retry(client, mock_http_client):
         )
     ]
     
-    # Send operation
-    with patch('asyncio.sleep', AsyncMock()) as mock_sleep:
-        await client._send_operation(1)
-    
-    # Check that retry sleep was called
-    mock_sleep.assert_called_once()
-    
-    # Check that HTTP client was called twice
-    assert mock_http_client.post.call_count == 2
-    
-    # Check that operation was registered as in progress after retry
-    assert 42 in client.operations_in_progress
-    assert client.operations_in_progress[42]["id"] == 1
+    # Usar patch para evitar que _operation_loop seja chamado como efeito colateral
+    with patch.object(client, '_operation_loop', AsyncMock(return_value=None)):
+        # Send operation
+        with patch('asyncio.sleep', AsyncMock()) as mock_sleep:
+            await client._send_operation(1)
+        
+        # Check that retry sleep was called
+        mock_sleep.assert_called_once()
+        
+        # Check that HTTP client was called twice
+        assert mock_http_client.post.call_count == 2
+        
+        # Check that operation was registered as in progress after retry
+        assert 42 in client.operations_in_progress
+        assert client.operations_in_progress[42]["id"] == 1
 
 @pytest.mark.asyncio
 async def test_send_operation_max_retries(client, mock_http_client):
@@ -397,56 +404,39 @@ async def test_network_partition(client, mock_http_client):
 @pytest.mark.asyncio
 async def test_request_deduplication(client, mock_http_client):
     """Testa a desduplicação de requisições."""
-    # Configura o cliente com desduplicação
-    client.request_ids = {}
-    client.request_id_ttl = 0.5  # TTL curto para teste
-    
-    # Primeira tentativa da operação
-    await client._send_operation(42)
-    
-    # Verificar que o HTTP client foi chamado
-    assert mock_http_client.post.call_count == 1
-    
-    # Segunda tentativa da mesma operação (com mesmo ID de operação)
-    # Deve ser detectada como duplicada e ignorada
-    mock_http_client.post.reset_mock()
-    await client._send_operation(42)
-    
-    # Verificar que o HTTP client não foi chamado na segunda vez
-    assert mock_http_client.post.call_count == 0
-    
-    # Aguarda expiração do TTL
-    await asyncio.sleep(1.0)
-    
-    # Após expiração, deve aceitar novamente
-    mock_http_client.post.reset_mock()
-    await client._send_operation(42)
-    assert mock_http_client.post.call_count == 1
-
-@pytest.fixture
-def mock_http_client():
-    """Fixture that creates a mock HTTP client."""
-    mock = AsyncMock()
-    mock.post = AsyncMock(return_value=MagicMock(
-        status_code=202,
-        json=MagicMock(return_value={"instanceId": 1})
-    ))
-    return mock
-
-@pytest.fixture
-def client(mock_http_client):
-    """Fixture that creates a PaxosClient for tests."""
-    client = PaxosClient(
-        client_id="client-1",
-        proposer_url="http://proposer-1:8080",
-        callback_url="http://client-1:8080/notification",
-        num_operations=20
-    )
-    
-    # Replace HTTP client with a mock
-    client.http_client = mock_http_client
-    
-    return client
+    try:
+        # Configura o cliente com desduplicação
+        client.request_ids = {}
+        client.request_id_ttl = 0.5  # TTL curto para teste
+        client._cleanup_tasks = []
+        
+        # Usar o mesmo timestamp para garantir IDs de requisição idênticos
+        fixed_timestamp = 1000000000
+        
+        # Primeira tentativa da operação
+        await client._send_operation(42, timestamp_override=fixed_timestamp)
+        
+        # Verificar que o HTTP client foi chamado
+        assert mock_http_client.post.call_count == 1
+        
+        # Segunda tentativa da mesma operação (com mesmo ID de operação)
+        # Deve ser detectada como duplicada e ignorada
+        mock_http_client.post.reset_mock()
+        await client._send_operation(42, timestamp_override=fixed_timestamp)
+        
+        # Verificar que o HTTP client não foi chamado na segunda vez
+        assert mock_http_client.post.call_count == 0
+        
+        # Aguarda expiração do TTL
+        await asyncio.sleep(1.0)
+        
+        # Após expiração, deve aceitar novamente
+        mock_http_client.post.reset_mock()
+        await client._send_operation(42, timestamp_override=fixed_timestamp)
+        assert mock_http_client.post.call_count == 1
+    finally:
+        # Garante limpeza de recursos ao final do teste
+        await client.cleanup_pending_tasks()
 
 @pytest.mark.asyncio
 async def test_operation_loop_with_many_in_progress(client):

@@ -64,13 +64,21 @@ class PaxosClient:
         self.running = True
         logger.info(f"Iniciando ciclo de operações. Total planejado: {self.num_operations}")
         
-        # Inicia o loop de operações como uma task separada
-        asyncio.create_task(self._operation_loop())
+        # Agora retornamos a task criada em vez de apenas criá-la
+        loop_task = asyncio.create_task(self._operation_loop())
+        
+        # Em produção, isso funciona normalmente
+        # Em testes, podemos aguardar ou cancelar esta task conforme necessário
+        return loop_task
         
     async def stop(self):
         """Para o ciclo de operações do cliente."""
         logger.info("Parando cliente...")
         self.running = False
+
+        # Limpa todas as tasks pendentes
+        await self.cleanup_pending_tasks()
+        
         await self.http_client.aclose()
         logger.info("Cliente parado")
         
@@ -102,7 +110,7 @@ class PaxosClient:
             logger.error(f"Erro no loop de operações: {e}", exc_info=True)
             self.running = False
     
-    async def _send_operation(self, operation_id: int, retries: int = 0):
+    async def _send_operation(self, operation_id: int, retries: int = 0, timestamp_override: Optional[int] = None):
         """
         Envia uma operação de escrita para o proposer.
         
@@ -112,11 +120,11 @@ class PaxosClient:
         """
         try:
             # Gera dados da operação
-            timestamp = int(time.time() * 1000)
+            timestamp = timestamp_override or int(time.time() * 1000)
             data = f"Data {self.client_id}-{operation_id} at {timestamp}"
 
             # Cria ID de requisição para desduplicação
-            request_id = f"{self.client_id}-{operation_id}-{timestamp}"
+            request_id = f"{self.client_id}-{operation_id}"
             
             # Verifica se é uma requisição duplicada
             if request_id in self.request_ids:
@@ -127,7 +135,11 @@ class PaxosClient:
             self.request_ids[request_id] = operation_id
             
             # Agenda limpeza do ID de requisição após TTL
-            asyncio.create_task(self._cleanup_request_id(request_id))
+            cleanup_task = asyncio.create_task(self._cleanup_request_id(request_id))
+            # Armazenar referência da task para cancelamento posterior
+            if not hasattr(self, '_cleanup_tasks'):
+                self._cleanup_tasks = []
+            self._cleanup_tasks.append(cleanup_task)
             
             # Cria payload da requisição
             payload = {
@@ -297,6 +309,27 @@ class PaxosClient:
                 await asyncio.sleep(retry_delay)
                 await self._send_operation(operation_id, retries + 1)
 
+    async def cleanup_pending_tasks(self):
+        """Limpa todas as tasks pendentes criadas pelo cliente."""
+        if hasattr(self, '_cleanup_tasks'):
+            for task in self._cleanup_tasks:
+                if not task.done():
+                    task.cancel()
+            
+            # Aguarda o cancelamento de todas as tasks
+            await asyncio.gather(*[t for t in self._cleanup_tasks], return_exceptions=True)
+            self._cleanup_tasks = []
+        
+        # Também limpa tasks de timeout
+        if hasattr(self, '_timeout_tasks'):
+            for task in self._timeout_tasks:
+                if not task.done():
+                    task.cancel()
+            
+            # Aguarda o cancelamento de todas as tasks
+            await asyncio.gather(*[t for t in self._timeout_tasks], return_exceptions=True)
+            self._timeout_tasks = []
+
     # Método para limpar IDs de requisição antigos
     async def _cleanup_request_id(self, request_id: str):
         await asyncio.sleep(self.request_id_ttl)
@@ -311,26 +344,31 @@ class PaxosClient:
         Args:
             instance_id: ID da instância Paxos para a operação
         """
-        # Espera 30 segundos
-        await asyncio.sleep(30)
-        
-        # Verifica se a operação ainda está pendente
-        if instance_id in self.operations_in_progress:
-            operation_info = self.operations_in_progress.pop(instance_id)
-            operation_id = operation_info["id"]
+        try:
+            # Espera 30 segundos
+            await asyncio.sleep(30)
             
-            logger.warning(f"Timeout para operação #{operation_id} com instanceId {instance_id}")
-            
-            # Atualiza informações da operação
-            operation_info["status"] = "timeout"
-            operation_info["end_time"] = time.time()
-            operation_info["latency"] = operation_info["end_time"] - operation_info["start_time"]
-            
-            # Incrementa contador de falhas
-            self.operations_failed += 1
-            
-            # Adiciona ao histórico
-            self.history.append(operation_info)
+            # Verifica se a operação ainda está pendente
+            if instance_id in self.operations_in_progress:
+                operation_info = self.operations_in_progress.pop(instance_id)
+                operation_id = operation_info["id"]
+                
+                logger.warning(f"Timeout para operação #{operation_id} com instanceId {instance_id}")
+                
+                # Atualiza informações da operação
+                operation_info["status"] = "timeout"
+                operation_info["end_time"] = time.time()
+                operation_info["latency"] = operation_info["end_time"] - operation_info["start_time"]
+                
+                # Incrementa contador de falhas
+                self.operations_failed += 1
+                
+                # Adiciona ao histórico
+                self.history.append(operation_info)
+        except asyncio.CancelledError:
+            # Tratamento limpo de cancelamento
+            logger.debug(f"Task de timeout para {instance_id} cancelada")
+            raise
     
     def process_notification(self, notification: Dict[str, Any]) -> Dict[str, Any]:
         """
