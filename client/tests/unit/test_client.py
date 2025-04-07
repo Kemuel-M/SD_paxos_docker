@@ -49,10 +49,15 @@ async def client(mock_http_client):
     client._cleanup_tasks = []
     client._timeout_tasks = []
     
-    yield client
+    # Mockando _operation_loop globalmente para evitar coroutines não aguardadas
+    with patch.object(client, '_operation_loop', MagicMock()):
+        yield client
     
     # Limpa recursos ao final
     await client.cleanup_pending_tasks()
+    
+    # Limpar qualquer task pendente criada com AsyncMock
+    await asyncio.sleep(0.1)  # Pequeno delay para permitir que tasks interrompidas terminem
 
 @pytest.mark.asyncio
 async def test_client_initialization(client):
@@ -146,8 +151,8 @@ async def test_send_operation_error_retry(client, mock_http_client):
         MagicMock(status_code=202, json=MagicMock(return_value={"instanceId": 42}))
     ]
     
-    # Adicionar este patch para evitar a criação da coroutine não aguardada
-    with patch.object(client, '_operation_loop', AsyncMock(return_value=None)):
+    # Use MagicMock em vez de AsyncMock aqui
+    with patch.object(client, '_operation_loop', MagicMock()):
         # Patch mais específico no método que está criando as tasks
         with patch.object(client, '_cleanup_request_id', AsyncMock()):
             # Patch no asyncio.sleep para facilitar o teste
@@ -163,9 +168,9 @@ async def test_send_operation_error_retry(client, mock_http_client):
             # Check that operation was registered as in progress after retry
             assert 42 in client.operations_in_progress
             assert client.operations_in_progress[42]["id"] == 1
-            
-        # Limpa _cleanup_tasks antes do teardown para evitar o erro
-        client._cleanup_tasks = []
+    
+    # Limpa _cleanup_tasks antes do teardown para evitar o erro
+    client._cleanup_tasks = []
 
 @pytest.mark.asyncio
 async def test_send_operation_max_retries(client, mock_http_client):
