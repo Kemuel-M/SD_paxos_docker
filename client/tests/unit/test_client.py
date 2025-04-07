@@ -6,6 +6,7 @@ import os
 import json
 import time
 import pytest
+import pytest_asyncio
 import asyncio
 from unittest.mock import MagicMock, patch, AsyncMock
 
@@ -33,7 +34,7 @@ def mock_http_client():
     ))
     return mock
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def client(mock_http_client):
     """Fixture que cria um PaxosClient para testes."""
     client = PaxosClient(
