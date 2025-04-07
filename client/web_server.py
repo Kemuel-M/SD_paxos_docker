@@ -182,7 +182,7 @@ class WebServer:
         
         # API para iniciar operação manual
         @self.app.post("/api/operation")
-        async def api_operation(data: str):
+        async def api_operation(data: str ):
             if not self.client.running:
                 raise HTTPException(status_code=400, detail="Cliente não está em execução")
             

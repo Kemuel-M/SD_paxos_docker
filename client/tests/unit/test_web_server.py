@@ -349,7 +349,7 @@ def test_api_operation_route(web_client, mock_client):
     # Create mock for asyncio.create_task
     with patch('asyncio.create_task') as mock_create_task:
         # Send request
-        response = web_client.post("/api/operation", json="test data")
+        response = web_client.post("/api/operation", params={"data": "test data"})
         
         # Check response
         assert response.status_code == 200
