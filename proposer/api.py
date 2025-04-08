@@ -285,6 +285,22 @@ def initialize(proposer_id: str, debug: bool = None):
     # Cria as instâncias
     proposer = Proposer(proposer_id, debug)
     leader_election = LeaderElection(proposer_id, debug)
+
+    # Definir líder inicial
+    import os
+    initial_leader_id = os.environ.get("INITIAL_LEADER_ID", "proposer_1")
+    
+    # Define o líder atual
+    leader_election.current_leader = initial_leader_id
+    proposer.current_leader = initial_leader_id
+    
+    # Define se este proposer é o líder
+    proposer.is_leader = (proposer_id == initial_leader_id)
+    
+    if proposer.is_leader:
+        logger.info(f"Proposer {proposer_id} inicializado como LÍDER (debug={debug})")
+    else:
+        logger.info(f"Proposer {proposer_id} inicializado com líder={initial_leader_id} (debug={debug})")
     
     logger.info(f"Proposer {proposer_id} inicializado (debug={debug})")
 

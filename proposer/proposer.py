@@ -490,11 +490,35 @@ class Proposer:
         # Se não somos o líder, repassamos a proposta para o líder atual
         if not self.is_leader and self.current_leader:
             logger.info(f"Não somos o líder. Repassando proposta para {self.current_leader}")
-            # Implementar o repasse da proposta para o líder
-            # (não implementado aqui para manter o código mais simples)
+            
+            # Obter a URL do líder
+            leader_url = None
+            for prop_id, url in self.other_proposers.items():
+                if prop_id == self.current_leader:
+                    leader_url = url
+                    break
+            
+            if leader_url:
+                # Encaminhar a proposta para o líder
+                forward_url = f"{leader_url}/propose"
+                forward_data = {
+                    "client_id": client_id,
+                    "resource_data": resource_data
+                }
+                
+                try:
+                    return await http_request("POST", forward_url, data=forward_data)
+                except Exception as e:
+                    logger.error(f"Erro ao encaminhar proposta para o líder: {str(e)}")
+                    return {
+                        "success": False,
+                        "error": f"Falha ao encaminhar para o líder: {str(e)}",
+                        "leader": self.current_leader
+                    }
+            
             return {
                 "success": False,
-                "error": "Este proposer não é o líder",
+                "error": "Líder desconhecido",
                 "leader": self.current_leader
             }
         
