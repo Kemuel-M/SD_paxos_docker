@@ -56,9 +56,7 @@ app = FastAPI(title="Learner API")
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     # Obtém o corpo da requisição
-    body = b""
-    async for chunk in request.body():
-        body += chunk
+    body = await request.body()
     
     # Reconstrói o stream de requisição para ser consumido novamente
     request._body = body
