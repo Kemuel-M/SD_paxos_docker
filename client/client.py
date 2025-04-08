@@ -1,514 +1,416 @@
-"""
-Implementação do cliente Paxos.
-Responsável por enviar requisições ao proposer e processar notificações dos learners.
-"""
-import os
-import time
-import random
-import logging
 import asyncio
-from typing import Dict, Any, List, Optional
-import httpx
+import logging
+import random
+import time
+from typing import Dict, List, Optional, Union
 
-logger = logging.getLogger("client")
+from common.utils import current_timestamp, generate_id, http_request
 
-class PaxosClient:
+logger = logging.getLogger(__name__)
+
+class Client:
     """
-    Cliente para o sistema Paxos.
-    Envia requisições ao proposer e processa notificações dos learners.
+    Implementação do cliente do sistema Paxos.
+    Responsável por enviar pedidos de acesso ao recurso R.
     """
-    def __init__(self, client_id: str, proposer_url: str, callback_url: str, 
-                num_operations: Optional[int] = None, resource_id: str = "R"):
+    
+    def __init__(self, client_id: str, debug: bool = False):
         """
-        Inicializa o cliente Paxos.
+        Inicializa o cliente.
         
         Args:
-            client_id: ID do cliente (formato client-X)
-            proposer_url: URL do proposer designado
-            callback_url: URL para receber notificações dos learners
-            num_operations: Número de operações a serem realizadas (aleatório entre 10-50 se None)
+            client_id: ID único do cliente
+            debug: Flag para ativar modo de depuração
         """
-        self.client_id = client_id
-        self.proposer_url = proposer_url
-        self.callback_url = callback_url
-        self.num_operations = num_operations or random.randint(10, 50)
+        self.id = client_id
+        self.debug = debug
+        
+        # URL do proposer que este cliente conhece
+        self.proposer_url: Optional[str] = None
+        
+        # Histórico de pedidos
+        self.requests: List[Dict] = []
         
         # Estado do cliente
-        self.operations_completed = 0
-        self.operations_failed = 0
-        self.operations_in_progress = {}  # instanceId -> operation_info
-        self.next_operation_id = 1
-        self.history = []  # Histórico de operações
         self.running = False
-        self.http_client = httpx.AsyncClient(timeout=10.0)
-
-        self.request_ids = {}  # Para rastrear requisições duplicadas: request_id -> operation_id
-        self.request_id_ttl = 300  # TTL em segundos para IDs de requisição
-        self.resource_id = resource_id
-        logger.info(f"Cliente {client_id} inicializado para recurso {resource_id}")
+        self.total_requests = 0
+        self.successful_requests = 0
+        self.failed_requests = 0
         
-        # Métricas
-        self.latencies = []
-        self.start_time = time.time()
+        # Configurações para os pedidos aleatórios
+        self.min_wait = 1.0  # Tempo mínimo de espera entre pedidos (segundos)
+        self.max_wait = 5.0  # Tempo máximo de espera entre pedidos (segundos)
+        self.min_requests = 10  # Número mínimo de pedidos a serem enviados
+        self.max_requests = 50  # Número máximo de pedidos a serem enviados
         
-        logger.info(f"Cliente {client_id} inicializado com {self.num_operations} operações para realizar")
-        logger.info(f"Proposer designado: {proposer_url}")
-        logger.info(f"URL de callback: {callback_url}")
+        # Lista de ouvintes para notificações
+        self.listeners: List[callable] = []
+        
+        # Task para o loop de pedidos
+        self._task: Optional[asyncio.Task] = None
+        
+        logger.debug(f"Cliente {client_id} inicializado (debug={debug})")
     
-    async def start(self):
-        """Inicia o ciclo de operações do cliente."""
+    def set_proposer(self, url: str) -> None:
+        """
+        Define o proposer que este cliente conhece.
+        
+        Args:
+            url: URL base do proposer
+        """
+        self.proposer_url = url
+        logger.debug(f"Proposer definido: {url}")
+    
+    def add_listener(self, listener: callable) -> None:
+        """
+        Adiciona um ouvinte para receber notificações de eventos.
+        
+        Args:
+            listener: Função a ser chamada quando ocorrer um evento
+        """
+        self.listeners.append(listener)
+        logger.debug(f"Ouvinte adicionado: {listener}")
+    
+    def _notify_listeners(self, event: str, data: Dict) -> None:
+        """
+        Notifica todos os ouvintes sobre um evento.
+        
+        Args:
+            event: Tipo de evento
+            data: Dados do evento
+        """
+        for listener in self.listeners:
+            try:
+                listener(event, data)
+            except Exception as e:
+                logger.error(f"Erro ao notificar ouvinte sobre evento {event}: {str(e)}")
+    
+    async def send_request(self, resource_data: Dict = None) -> Dict:
+        """
+        Envia um pedido de acesso ao recurso R.
+        
+        Args:
+            resource_data: Dados do recurso a serem enviados
+        
+        Returns:
+            Dict: Resultado do pedido
+        """
+        if not self.proposer_url:
+            error_msg = "Proposer não definido"
+            logger.error(error_msg)
+            return {
+                "success": False,
+                "error": error_msg
+            }
+        
+        # Se não foram fornecidos dados, gera alguns dados aleatórios
+        if not resource_data:
+            resource_data = self._generate_random_data()
+        
+        # Gera um timestamp para identificar o pedido
+        timestamp = current_timestamp()
+        
+        # Cria o pedido
+        request_data = {
+            "client_id": self.id,
+            "resource_data": resource_data
+        }
+        
+        # URL do endpoint propose do proposer
+        propose_url = f"{self.proposer_url}/propose"
+        
+        # Envia o pedido
+        try:
+            logger.info(f"Enviando pedido de acesso ao recurso R: timestamp={timestamp}")
+            
+            # Notifica os ouvintes sobre o início do pedido
+            self._notify_listeners("request_start", {
+                "timestamp": timestamp,
+                "client_id": self.id,
+                "resource_data": resource_data
+            })
+            
+            # Registra o pedido no histórico
+            request_entry = {
+                "timestamp": timestamp,
+                "resource_data": resource_data,
+                "status": "pending",
+                "start_time": time.time()
+            }
+            self.requests.append(request_entry)
+            
+            # Incrementa o contador de pedidos
+            self.total_requests += 1
+            
+            # Envia o pedido para o proposer
+            response = await http_request("POST", propose_url, data=request_data)
+            
+            # Atualiza o pedido no histórico
+            request_entry["response"] = response
+            request_entry["end_time"] = time.time()
+            
+            if response.get("success", False):
+                # Pedido bem-sucedido (pelo menos iniciou o processo de consenso)
+                request_entry["status"] = "accepted"
+                request_entry["proposal_id"] = response.get("proposal_id")
+                
+                logger.info(f"Pedido aceito pelo proposer: proposal_id={response.get('proposal_id')}")
+                
+                # Notifica os ouvintes sobre o pedido aceito
+                self._notify_listeners("request_accepted", {
+                    "timestamp": timestamp,
+                    "client_id": self.id,
+                    "proposal_id": response.get("proposal_id"),
+                    "resource_data": resource_data
+                })
+                
+                # Incrementa o contador de pedidos bem-sucedidos
+                self.successful_requests += 1
+            else:
+                # Pedido falhou
+                request_entry["status"] = "failed"
+                request_entry["error"] = response.get("error", "Erro desconhecido")
+                
+                logger.warning(f"Pedido rejeitado pelo proposer: {response.get('error', 'Erro desconhecido')}")
+                
+                # Notifica os ouvintes sobre o pedido rejeitado
+                self._notify_listeners("request_rejected", {
+                    "timestamp": timestamp,
+                    "client_id": self.id,
+                    "error": response.get("error", "Erro desconhecido"),
+                    "resource_data": resource_data
+                })
+                
+                # Incrementa o contador de pedidos falhos
+                self.failed_requests += 1
+            
+            return response
+        except Exception as e:
+            error_str = str(e)
+            logger.error(f"Erro ao enviar pedido: {error_str}")
+            
+            # Atualiza o pedido no histórico
+            if len(self.requests) > 0 and self.requests[-1].get("timestamp") == timestamp:
+                self.requests[-1]["status"] = "error"
+                self.requests[-1]["error"] = error_str
+                self.requests[-1]["end_time"] = time.time()
+            
+            # Notifica os ouvintes sobre o erro
+            self._notify_listeners("request_error", {
+                "timestamp": timestamp,
+                "client_id": self.id,
+                "error": error_str,
+                "resource_data": resource_data
+            })
+            
+            # Incrementa o contador de pedidos falhos
+            self.failed_requests += 1
+            
+            return {
+                "success": False,
+                "error": error_str
+            }
+    
+    def _generate_random_data(self) -> Dict:
+        """
+        Gera dados aleatórios para o recurso R.
+        
+        Returns:
+            Dict: Dados aleatórios
+        """
+        # Simula um documento JSON com dados aleatórios
+        return {
+            "name": f"Resource_{random.randint(1, 1000)}",
+            "value": random.randint(1, 100),
+            "created_by": self.id,
+            "timestamp": time.time(),
+            "random_data": {
+                "field1": random.choice(["foo", "bar", "baz"]),
+                "field2": random.random(),
+                "field3": bool(random.getrandbits(1))
+            }
+        }
+    
+    async def start_random_requests(self, num_requests: int = None) -> None:
+        """
+        Inicia o loop de envio de pedidos aleatórios.
+        
+        Args:
+            num_requests: Número de pedidos a serem enviados (se None, usa um valor aleatório)
+        """
         if self.running:
-            logger.warning("Cliente já está em execução")
+            logger.warning("Cliente já está enviando pedidos")
             return
         
         self.running = True
-        logger.info(f"Iniciando ciclo de operações. Total planejado: {self.num_operations}")
         
-        # Criar uma referência para a task para que possa ser gerenciada posteriormente
-        self._main_task = asyncio.create_task(self._operation_loop())
+        # Define o número de pedidos a serem enviados
+        if num_requests is None:
+            num_requests = random.randint(self.min_requests, self.max_requests)
         
-        # Adicionar à lista de tasks para cleanup
-        if not hasattr(self, '_tasks'):
-            self._tasks = []
-        self._tasks.append(self._main_task)
+        logger.info(f"Iniciando loop de {num_requests} pedidos aleatórios")
         
-        return self._main_task
+        # Notifica os ouvintes sobre o início dos pedidos
+        self._notify_listeners("requests_started", {
+            "client_id": self.id,
+            "num_requests": num_requests
+        })
         
-    async def stop(self):
-        """Para o ciclo de operações do cliente."""
-        logger.info("Parando cliente...")
-        self.running = False
-
-        # Cancela a task principal se existir
-        if hasattr(self, '_main_task') and not self._main_task.done():
-            self._main_task.cancel()
-            try:
-                await self._main_task
-            except asyncio.CancelledError:
-                pass
-
-        # Limpa todas as tasks pendentes
-        await self.cleanup_pending_tasks()
-
-        await self.http_client.aclose()
-        logger.info("Cliente parado")
+        # Inicia o loop de pedidos em uma nova task
+        self._task = asyncio.create_task(self._request_loop(num_requests))
+    
+    async def _request_loop(self, num_requests: int) -> None:
+        """
+        Loop para envio de pedidos aleatórios.
         
-    async def _operation_loop(self):
-        """Loop principal que executa as operações planejadas."""
+        Args:
+            num_requests: Número de pedidos a serem enviados
+        """
         try:
-            while self.running and (self.operations_completed + self.operations_failed) < self.num_operations:
-                # Verifica se há muitas operações em andamento
-                if len(self.operations_in_progress) > 5:
-                    logger.debug(f"Aguardando conclusão de operações em andamento: {len(self.operations_in_progress)}")
-                    await asyncio.sleep(0.5)
-                    continue
+            for i in range(num_requests):
+                if not self.running:
+                    logger.info("Loop de pedidos interrompido")
+                    break
                 
-                # Cria e envia nova operação
-                operation_id = self.next_operation_id
-                self.next_operation_id += 1
+                # Envia um pedido
+                await self.send_request()
                 
-                logger.info(f"Iniciando operação #{operation_id}")
-                asyncio.create_task(self._send_operation(operation_id))
-                
-                # Espera tempo aleatório entre 1.0 e 5.0 segundos
-                wait_time = random.uniform(1.0, 5.0)
-                logger.debug(f"Aguardando {wait_time:.2f}s antes da próxima operação")
-                await asyncio.sleep(wait_time)
-                
-            logger.info(f"Ciclo de operações concluído. Completadas: {self.operations_completed}, Falhas: {self.operations_failed}")
+                # Espera um tempo aleatório antes do próximo pedido
+                if i < num_requests - 1:  # Não espera após o último pedido
+                    wait_time = random.uniform(self.min_wait, self.max_wait)
+                    logger.debug(f"Aguardando {wait_time:.2f}s antes do próximo pedido ({i+1}/{num_requests})")
+                    
+                    # Notifica os ouvintes sobre a espera
+                    self._notify_listeners("request_wait", {
+                        "client_id": self.id,
+                        "wait_time": wait_time,
+                        "current_request": i + 1,
+                        "total_requests": num_requests
+                    })
+                    
+                    await asyncio.sleep(wait_time)
             
+            logger.info(f"Loop de pedidos concluído: {num_requests} pedidos enviados")
+            
+            # Notifica os ouvintes sobre o fim dos pedidos
+            self._notify_listeners("requests_completed", {
+                "client_id": self.id,
+                "total_requests": num_requests,
+                "successful_requests": self.successful_requests,
+                "failed_requests": self.failed_requests
+            })
         except Exception as e:
-            logger.error(f"Erro no loop de operações: {e}", exc_info=True)
+            logger.error(f"Erro no loop de pedidos: {str(e)}")
+            
+            # Notifica os ouvintes sobre o erro
+            self._notify_listeners("requests_error", {
+                "client_id": self.id,
+                "error": str(e)
+            })
+        finally:
             self.running = False
     
-    async def _send_operation(self, operation_id: int, retries: int = 0, timestamp_override: Optional[int] = None):
+    def stop_requests(self) -> None:
         """
-        Envia uma operação de escrita para o proposer.
-        
-        Args:
-            operation_id: ID da operação (usado apenas localmente)
-            retries: Número de tentativas realizadas
-            timestamp_override: Timestamp opcional para testes
+        Para o loop de envio de pedidos.
         """
-        try:
-            # Gera dados da operação
-            timestamp = timestamp_override or int(time.time() * 1000)
-            data = f"Data {self.client_id}-{operation_id} at {timestamp}"
-
-            # Cria ID de requisição para desduplicação
-            request_id = f"{self.client_id}-{operation_id}-{retries}"
-            
-            # Verifica se é uma requisição duplicada
-            if request_id in self.request_ids:
-                logger.info(f"Requisição duplicada detectada: {request_id}, ignorando.")
-                return
-                
-            # Armazena ID de requisição
-            self.request_ids[request_id] = operation_id
-            
-            # Agenda limpeza do ID de requisição após TTL
-            cleanup_task = asyncio.create_task(self._cleanup_request_id(request_id))
-            if not hasattr(self, '_cleanup_tasks'):
-                self._cleanup_tasks = []
-            self._cleanup_tasks.append(cleanup_task)
-            
-            # Cria payload da requisição
-            payload = {
-                "clientId": self.client_id,
-                "timestamp": timestamp,
-                "operation": "WRITE",
-                "resource": self.resource_id,
-                "data": data
-            }
-            
-            # Registra início da operação
-            start_time = time.time()
-            operation_info = {
-                "id": operation_id,
-                "start_time": start_time,
-                "payload": payload,
-                "retries": retries,
-                "status": "in_progress"
-            }
-            
-            logger.info(f"Enviando operação #{operation_id} para o proposer: WRITE em {self.resource_id}")
-            if retries > 0:
-                logger.info(f"Esta é a tentativa #{retries+1} para operação #{operation_id}")
-            
-            # Envia para o proposer
-            response = await self.http_client.post(
-                f"{self.proposer_url}/propose",
-                json=payload,
-                timeout=10.0  # Timeout mais longo para proposer
-            )
-            
-            # Processa resposta
-            if response.status_code == 202:  # Accepted
-                data = response.json()
-                instance_id = data.get("instanceId")
-                
-                if not instance_id:
-                    logger.warning(f"Resposta do proposer não contém instanceId: {data}")
-                    operation_info["status"] = "failed"
-                    operation_info["error"] = "Missing instanceId in response"
-                    self.operations_failed += 1
-                    self.history.append(operation_info)
-                    return
-                
-                logger.info(f"Operação #{operation_id} aceita pelo proposer com instanceId {instance_id}")
-                
-                # Registra operação em andamento
-                operation_info["instance_id"] = instance_id
-                self.operations_in_progress[instance_id] = operation_info
-                
-                # Configura timeout para o caso de não receber notificação
-                timeout_task = asyncio.create_task(self._handle_operation_timeout(instance_id))
-                if not hasattr(self, '_timeout_tasks'):
-                    self._timeout_tasks = []
-                self._timeout_tasks.append(timeout_task)
-                
-            elif response.status_code == 307:  # Redirect
-                # Redirecionamento para outro proposer (provavelmente o líder)
-                redirect_url = response.headers.get("Location")
-                if not redirect_url:
-                    logger.warning(f"Redirecionamento sem Location header: {response.headers}")
-                    operation_info["status"] = "failed"
-                    operation_info["error"] = "Redirect without Location header"
-                    self.operations_failed += 1
-                    self.history.append(operation_info)
-                    return
-                
-                logger.info(f"Redirecionando operação #{operation_id} para {redirect_url}")
-                
-                # Atualiza o proposer para esta operação específica
-                from urllib.parse import urlparse
-                parsed_url = urlparse(redirect_url)
-                temp_proposer_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-                
-                # Reenviar para o novo proposer após um pequeno delay
-                await asyncio.sleep(0.1)
-                
-                # Cria payload da requisição
-                new_payload = {
-                    "clientId": self.client_id,
-                    "timestamp": int(time.time() * 1000),  # Atualiza timestamp
-                    "operation": operation_info["payload"]["operation"],
-                    "resource": operation_info["payload"]["resource"],
-                    "data": operation_info["payload"]["data"]  # Usa os dados do payload original
-                }
-                
-                # Envia para o novo proposer
-                response = await self.http_client.post(
-                    f"{temp_proposer_url}/propose",
-                    json=new_payload,
-                    timeout=10.0
-                )
-                
-                # Processa resposta do novo proposer
-                if response.status_code == 202:  # Accepted
-                    data = response.json()
-                    instance_id = data.get("instanceId")
-                    
-                    if not instance_id:
-                        logger.warning(f"Resposta do proposer redirecionado não contém instanceId: {data}")
-                        operation_info["status"] = "failed"
-                        operation_info["error"] = "Missing instanceId in response from redirected proposer"
-                        self.operations_failed += 1
-                        self.history.append(operation_info)
-                        return
-                    
-                    logger.info(f"Operação #{operation_id} aceita pelo proposer redirecionado com instanceId {instance_id}")
-                    
-                    # Registra operação em andamento
-                    operation_info["instance_id"] = instance_id
-                    self.operations_in_progress[instance_id] = operation_info
-                    
-                    # Configura timeout para o caso de não receber notificação
-                    timeout_task = asyncio.create_task(self._handle_operation_timeout(instance_id))
-                    if not hasattr(self, '_timeout_tasks'):
-                        self._timeout_tasks = []
-                    self._timeout_tasks.append(timeout_task)
-                else:
-                    logger.error(f"Falha após redirecionamento para operação #{operation_id}: {response.status_code}")
-                    logger.debug(f"Resposta: {response.text}")
-                    
-                    # Trata como falha se exceder limite de tentativas
-                    if retries >= 2:
-                        logger.warning(f"Número máximo de tentativas excedido para operação #{operation_id}")
-                        operation_info["status"] = "failed"
-                        operation_info["error"] = f"Failed after redirect: {response.status_code}"
-                        self.operations_failed += 1
-                        self.history.append(operation_info)
-                    else:
-                        # Tenta novamente após um delay
-                        retry_delay = random.uniform(1.0, 3.0)
-                        logger.info(f"Tentando novamente operação #{operation_id} após {retry_delay:.2f}s")
-                        await asyncio.sleep(retry_delay)
-                        await self._send_operation(operation_id, retries + 1, timestamp_override)
-            
-            else:
-                logger.error(f"Erro ao enviar operação #{operation_id}: {response.status_code}")
-                logger.debug(f"Resposta: {response.text}")
-                
-                # Trata como falha se exceder limite de tentativas
-                if retries >= 2:
-                    logger.warning(f"Número máximo de tentativas excedido para operação #{operation_id}")
-                    operation_info["status"] = "failed"
-                    operation_info["error"] = f"Failed with status: {response.status_code}"
-                    self.operations_failed += 1
-                    self.history.append(operation_info)
-                else:
-                    # Tenta novamente após um delay
-                    retry_delay = random.uniform(1.0, 3.0)
-                    logger.info(f"Tentando novamente operação #{operation_id} após {retry_delay:.2f}s")
-                    await asyncio.sleep(retry_delay)
-                    await self._send_operation(operation_id, retries + 1, timestamp_override)
+        if not self.running:
+            logger.warning("Cliente não está enviando pedidos")
+            return
         
-        except Exception as e:
-            logger.error(f"Exceção ao enviar operação #{operation_id}: {e}", exc_info=True)
-            
-            # Trata como falha se exceder limite de tentativas
-            if retries >= 2:
-                logger.warning(f"Número máximo de tentativas excedido para operação #{operation_id}")
-                operation_info = {
-                    "id": operation_id,
-                    "start_time": time.time(),
-                    "status": "failed",
-                    "error": f"{type(e).__name__}: {str(e)}",
-                    "retries": retries
-                }
-                self.operations_failed += 1
-                self.history.append(operation_info)
-            else:
-                # Tenta novamente após um delay
-                retry_delay = random.uniform(1.0, 3.0)
-                logger.info(f"Tentando novamente operação #{operation_id} após {retry_delay:.2f}s")
-                await asyncio.sleep(retry_delay)
-                
-                await self._send_operation(operation_id, retries + 1, timestamp_override)
-
-    async def cleanup_pending_tasks(self):
-        """Limpa todas as tasks pendentes criadas pelo cliente."""
-        task_lists = ['_cleanup_tasks', '_timeout_tasks']
-        if hasattr(self, '_tasks'):
-            task_lists.append('_tasks')
-            
-        for list_name in task_lists:
-            if hasattr(self, list_name):
-                tasks = getattr(self, list_name)
-                valid_tasks = []
-                
-                for task in tasks:
-                    if isinstance(task, asyncio.Task) and not task.done():
-                        task.cancel()
-                        valid_tasks.append(task)
-                
-                if valid_tasks:
-                    await asyncio.gather(*valid_tasks, return_exceptions=True)
-                
-                setattr(self, list_name, [])
+        self.running = False
         
-        # Mesmo tratamento para timeout_tasks
-        if hasattr(self, '_timeout_tasks'):
-            valid_tasks = []
-            for task in self._timeout_tasks:
-                if hasattr(task, 'done') and callable(task.done):
-                    if not task.done():
-                        task.cancel()
-                    valid_tasks.append(task)
-            
-            if valid_tasks:
-                await asyncio.gather(*valid_tasks, return_exceptions=True)
-            
-            self._timeout_tasks = []
-
-    # Método para limpar IDs de requisição antigos
-    async def _cleanup_request_id(self, request_id: str):
-        await asyncio.sleep(self.request_id_ttl)
-        if request_id in self.request_ids:
-            self.request_ids.pop(request_id)
-            logger.debug(f"ID de requisição expirado removido: {request_id}")
+        if self._task:
+            self._task.cancel()
+        
+        logger.info("Loop de pedidos interrompido")
+        
+        # Notifica os ouvintes sobre a interrupção
+        self._notify_listeners("requests_stopped", {
+            "client_id": self.id
+        })
     
-    async def _handle_operation_timeout(self, instance_id: str):
+    async def handle_notification(self, proposal_id: str, tid: int, status: str, 
+                               resource_data: Dict, learner_id: str, timestamp: float,
+                               protocol: str = None) -> Dict:
         """
-        Gerencia timeout para uma operação pendente.
+        Processa uma notificação recebida de um learner.
         
         Args:
-            instance_id: ID da instância Paxos para a operação
-        """
-        try:
-            # Espera 30 segundos
-            await asyncio.sleep(30)
-            
-            # Verifica se a operação ainda está pendente
-            if instance_id in self.operations_in_progress:
-                operation_info = self.operations_in_progress.pop(instance_id)
-                operation_id = operation_info["id"]
-                
-                logger.warning(f"Timeout para operação #{operation_id} com instanceId {instance_id}")
-                
-                # Atualiza informações da operação
-                operation_info["status"] = "timeout"
-                operation_info["end_time"] = time.time()
-                operation_info["latency"] = operation_info["end_time"] - operation_info["start_time"]
-                
-                # Incrementa contador de falhas
-                self.operations_failed += 1
-                
-                # Adiciona ao histórico
-                self.history.append(operation_info)
-        except asyncio.CancelledError:
-            # Tratamento limpo de cancelamento
-            logger.debug(f"Task de timeout para {instance_id} cancelada")
-            raise
-    
-    def process_notification(self, notification: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Processa notificação do learner.
+            proposal_id: ID da proposta
+            tid: TID da proposta
+            status: Status da proposta (COMMITTED ou NOT_COMMITTED)
+            resource_data: Dados do recurso
+            learner_id: ID do learner que enviou a notificação
+            timestamp: Timestamp da notificação
+            protocol: Protocolo usado (opcional)
         
-        Args:
-            notification: Notificação recebida do learner
-            
         Returns:
-            Dict[str, Any]: Resposta para o learner
+            Dict: Resultado do processamento
         """
-        instance_id = notification.get("instanceId")
-        status = notification.get("status")
-        timestamp = notification.get("timestamp")
-        resource = notification.get("resource")
-        
-        logger.info(f"Recebida notificação do learner: instanceId={instance_id}, status={status}")
-        
-        # Verifica se temos uma operação correspondente
-        if instance_id not in self.operations_in_progress:
-            logger.warning(f"Notificação recebida para instanceId desconhecido: {instance_id}")
-            return {"status": "acknowledged", "known": False}
-        
-        # Obtém informações da operação
-        operation_info = self.operations_in_progress.pop(instance_id)
-        operation_id = operation_info["id"]
-        start_time = operation_info["start_time"]
-        
-        # Calcula latência
-        end_time = time.time()
-        latency = end_time - start_time
-        
-        # Atualiza informações da operação
-        operation_info["status"] = status
-        operation_info["end_time"] = end_time
-        operation_info["latency"] = latency
-        operation_info["notification"] = notification
-        
-        # Registra no histórico
-        self.history.append(operation_info)
-        
-        # Atualiza contadores
-        if status == "COMMITTED":
-            self.operations_completed += 1
-            self.latencies.append(latency)
-            logger.info(f"Operação #{operation_id} concluída com sucesso em {latency:.2f}s")
+        # Procura o pedido correspondente no histórico
+        for request in self.requests:
+            if request.get("proposal_id") == proposal_id:
+                # Atualiza o pedido no histórico
+                request["status"] = status.lower()
+                request["notification"] = {
+                    "learner_id": learner_id,
+                    "timestamp": timestamp,
+                    "protocol": protocol
+                }
+                
+                if status == "COMMITTED":
+                    logger.info(f"Proposta {proposal_id} commitada: TID={tid}, learner={learner_id}")
+                    
+                    # Notifica os ouvintes sobre o commit
+                    self._notify_listeners("proposal_committed", {
+                        "client_id": self.id,
+                        "proposal_id": proposal_id,
+                        "tid": tid,
+                        "learner_id": learner_id,
+                        "resource_data": resource_data,
+                        "protocol": protocol
+                    })
+                else:
+                    logger.warning(f"Proposta {proposal_id} não commitada: status={status}, learner={learner_id}")
+                    
+                    # Notifica os ouvintes sobre o não-commit
+                    self._notify_listeners("proposal_not_committed", {
+                        "client_id": self.id,
+                        "proposal_id": proposal_id,
+                        "tid": tid,
+                        "learner_id": learner_id,
+                        "status": status,
+                        "protocol": protocol
+                    })
+                
+                break
         else:
-            self.operations_failed += 1
-            logger.warning(f"Operação #{operation_id} falhou com status {status}")
+            # Não encontrou o pedido no histórico
+            logger.warning(f"Recebeu notificação para proposta desconhecida: {proposal_id}")
         
         return {
-            "status": "acknowledged",
-            "known": True,
-            "operation_id": operation_id
+            "success": True,
+            "proposal_id": proposal_id,
+            "client_id": self.id
         }
     
-    def get_status(self) -> Dict[str, Any]:
+    def get_status(self) -> Dict:
         """
-        Obtém status atual do cliente.
+        Obtém o status do cliente.
         
         Returns:
-            Dict[str, Any]: Status do cliente
+            Dict: Status do cliente
         """
-        runtime = time.time() - self.start_time
-        
         return {
-            "client_id": self.client_id,
+            "id": self.id,
+            "running": self.running,
+            "total_requests": self.total_requests,
+            "successful_requests": self.successful_requests,
+            "failed_requests": self.failed_requests,
             "proposer_url": self.proposer_url,
-            "total_operations": self.num_operations,
-            "completed": self.operations_completed,
-            "failed": self.operations_failed,
-            "in_progress": len(self.operations_in_progress),
-            "avg_latency": sum(self.latencies) / len(self.latencies) if self.latencies else 0,
-            "runtime": runtime,
-            "running": self.running
+            "min_wait": self.min_wait,
+            "max_wait": self.max_wait,
+            "min_requests": self.min_requests,
+            "max_requests": self.max_requests
         }
-    
-    def get_history(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """
-        Obtém histórico de operações.
-        
-        Args:
-            limit: Número máximo de operações a retornar
-            
-        Returns:
-            List[Dict[str, Any]]: Histórico de operações
-        """
-        # Retorna operações mais recentes primeiro
-        sorted_history = sorted(self.history, key=lambda x: x.get("start_time", 0), reverse=True)
-        return sorted_history[:limit]
-    
-    def get_operation(self, operation_id: int) -> Optional[Dict[str, Any]]:
-        """
-        Obtém detalhes de uma operação específica.
-        
-        Args:
-            operation_id: ID da operação
-            
-        Returns:
-            Optional[Dict[str, Any]]: Detalhes da operação ou None se não encontrada
-        """
-        for op in self.history:
-            if op.get("id") == operation_id:
-                return op
-        
-        # Verifica operações em andamento
-        for op in self.operations_in_progress.values():
-            if op.get("id") == operation_id:
-                return op
-        
-        return None

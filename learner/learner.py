@@ -1,401 +1,334 @@
-"""
-File: learner/learner.py
-Implementation of the Learner component for the Paxos consensus algorithm.
-Responsible for receiving notifications from acceptors, detecting consensus,
-and taking appropriate actions based on decided values.
-"""
-import os
-import time
-import logging
 import asyncio
-import random
-import hashlib
-from typing import Dict, List, Any, Optional, Set, Tuple
-from collections import defaultdict
+import logging
+import time
+from typing import Dict, List, Optional, Set
 
-from common.communication import HttpClient
-from common.utils import current_timestamp
+from common.utils import http_request
 
-# Enhanced debug configuration
-DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
-DEBUG_LEVEL = os.getenv("DEBUG_LEVEL", "basic").lower()  # Levels: basic, advanced, trace
-
-logger = logging.getLogger("learner")
+logger = logging.getLogger(__name__)
 
 class Learner:
     """
-    Implementation of the Learner in the Paxos consensus algorithm.
-    
-    Responsibilities:
-    1. Receive notifications from acceptors about accepted proposals
-    2. Detect when consensus is reached (majority of acceptors agree)
-    3. For Part 1: Simulate access to the resource
-    4. For Part 2: Implement ROWA protocol for accessing the Cluster Store
-    5. Notify clients about the result of their requests
+    Implementação do learner do algoritmo Paxos.
+    Responsável por aprender os valores decididos e notificar os clientes.
     """
     
-    def __init__(self, node_id: int, acceptors: List[str], stores: Optional[List[str]] = None,
-                consensus_manager=None, rowa_manager=None, use_cluster_store: bool = False):
+    def __init__(self, learner_id: str, debug: bool = False):
         """
-        Initialize the Learner component.
+        Inicializa o learner.
         
         Args:
-            node_id: ID of this learner
-            acceptors: List of acceptor addresses
-            stores: List of Cluster Store addresses (for Part 2)
-            consensus_manager: ConsensusManager instance
-            rowa_manager: RowaManager instance (for Part 2)
-            use_cluster_store: Whether to use Cluster Store (Part 2) or simulate access (Part 1)
+            learner_id: ID único do learner
+            debug: Flag para ativar modo de depuração
         """
-        self.node_id = node_id
-        self.acceptors = acceptors
-        self.stores = stores
-        self.consensus_manager = consensus_manager
-        self.rowa_manager = rowa_manager
-        self.use_cluster_store = use_cluster_store
+        self.id = learner_id
+        self.debug = debug
         
-        # HTTP client for communication
-        self.http_client = HttpClient()
+        # Controle de quóruns e propostas
+        self.acceptor_count = 0  # Número total de acceptors
+        self.quorum_size = 0  # Tamanho necessário para formar um quórum (maioria)
         
-        # Track pending client requests: instance_id -> client_callback_info
-        self.pending_clients = {}
+        # Estado das propostas
+        self.proposals: Dict[str, Dict] = {}  # {proposal_id: {acceptors: {}, tid: int, ...}}
         
-        # Statistics
-        self.notifications_processed = 0
-        self.decisions_made = 0
+        # Lista de stores
+        self.stores: Dict[str, str] = {}  # {store_id: url}
         
-        # Client notification tracking
-        self.client_notifications_sent = 0
-        self.client_notifications_failed = 0
+        # Lista de clientes
+        self.clients: Dict[str, str] = {}  # {client_id: url}
         
-        # Processing flag
-        self.running = False
+        # Locks
+        self.proposals_lock = asyncio.Lock()
         
-        # Pending tasks
-        self._pending_tasks = set()
-        
-        logger.info(f"Learner {node_id} initialized with {len(acceptors)} acceptors")
-        
-        if self.use_cluster_store:
-            logger.info(f"Using Cluster Store with {len(stores)} nodes")
-        else:
-            logger.info("Simulating resource access (Part 1)")
+        logger.debug(f"Learner {learner_id} inicializado (debug={debug})")
     
-    async def start(self):
-        """Start the learner asynchronously."""
-        if self.running:
-            return
-        
-        self.running = True
-        
-        # Register decision callback with consensus manager
-        for instance_id in self.consensus_manager.get_all_instance_ids():
-            self.consensus_manager.register_decision_callback(
-                instance_id, self._on_decision_made)
-        
-        logger.info(f"Learner {self.node_id} started")
-    
-    async def stop(self):
-        """Stop the learner asynchronously."""
-        if not self.running:
-            return
-        
-        self.running = False
-        
-        # Cancel pending tasks
-        for task in self._pending_tasks:
-            if not task.done():
-                task.cancel()
-        
-        # Wait for tasks to finish
-        if self._pending_tasks:
-            try:
-                await asyncio.wait(list(self._pending_tasks), timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout waiting for {len(self._pending_tasks)} pending tasks to finish")
-        
-        # Close HTTP client
-        await self.http_client.close()
-        
-        logger.info(f"Learner {self.node_id} stopped")
-    
-    async def process_learn_notification(self, notification: Dict[str, Any]) -> Dict[str, Any]:
+    def set_acceptor_count(self, count: int) -> None:
         """
-        Process a learn notification from an acceptor.
+        Define o número total de acceptors.
         
         Args:
-            notification: Notification message
-            
+            count: Número total de acceptors
+        """
+        self.acceptor_count = count
+        self.quorum_size = count // 2 + 1
+        logger.debug(f"Número de acceptors definido: {count}, quorum_size={self.quorum_size}")
+    
+    def add_store(self, store_id: str, url: str) -> None:
+        """
+        Adiciona um store à lista de stores conhecidos.
+        
+        Args:
+            store_id: ID do store
+            url: URL base do store
+        """
+        self.stores[store_id] = url
+        logger.debug(f"Store adicionado: {store_id} -> {url}")
+    
+    def add_client(self, client_id: str, url: str) -> None:
+        """
+        Adiciona um cliente à lista de clientes conhecidos.
+        
+        Args:
+            client_id: ID do cliente
+            url: URL base do cliente
+        """
+        self.clients[client_id] = url
+        logger.debug(f"Cliente adicionado: {client_id} -> {url}")
+    
+    async def learn(self, proposal_id: str, acceptor_id: str, proposer_id: str, 
+                   tid: int, client_id: str, resource_data: Dict, timestamp: int) -> Dict:
+        """
+        Aprende sobre uma proposta aceita por um acceptor.
+        
+        Args:
+            proposal_id: ID da proposta
+            acceptor_id: ID do acceptor que aceitou a proposta
+            proposer_id: ID do proposer que propôs o valor
+            tid: TID da proposta
+            client_id: ID do cliente
+            resource_data: Dados do recurso
+            timestamp: Timestamp da proposta
+        
         Returns:
-            Dict[str, Any]: Response
+            Dict: Resultado do aprendizado
         """
-        # Validate notification
-        if not self._validate_notification(notification):
-            logger.warning(f"Invalid notification received: {notification}")
-            return {"accepted": False, "reason": "Invalid notification"}
+        async with self.proposals_lock:
+            # Se já conhecemos esta proposta, atualizamos com o novo acceptor
+            if proposal_id in self.proposals:
+                proposal = self.proposals[proposal_id]
+                
+                # Adiciona o acceptor à lista de acceptors que aceitaram esta proposta
+                proposal["acceptors"][acceptor_id] = {
+                    "tid": tid,
+                    "timestamp": time.time()
+                }
+                
+                # Se o TID for diferente do que já conhecemos, algo está errado
+                if tid != proposal["tid"]:
+                    logger.warning(f"TID diferente para proposta {proposal_id}: {tid} != {proposal['tid']}")
+                
+                # Verifica se temos um quórum
+                if len(proposal["acceptors"]) >= self.quorum_size and not proposal.get("committed", False):
+                    # Temos um quórum! Podemos commitar a proposta
+                    logger.info(f"Quórum alcançado para proposta {proposal_id}: {len(proposal['acceptors'])} acceptors")
+                    
+                    # Marca a proposta como commitada
+                    proposal["committed"] = True
+                    proposal["committed_at"] = time.time()
+                    
+                    # Notifica o cliente
+                    await self._notify_client(client_id, proposal_id, tid, resource_data, "COMMITTED")
+                    
+                    # Notifica os stores
+                    await self._update_stores(proposal_id, tid, resource_data)
+            else:
+                # Primeira vez que vemos esta proposta
+                self.proposals[proposal_id] = {
+                    "proposal_id": proposal_id,
+                    "tid": tid,
+                    "proposer_id": proposer_id,
+                    "client_id": client_id,
+                    "resource_data": resource_data,
+                    "timestamp": timestamp,
+                    "first_learned_at": time.time(),
+                    "acceptors": {
+                        acceptor_id: {
+                            "tid": tid,
+                            "timestamp": time.time()
+                        }
+                    },
+                    "committed": False
+                }
+                
+                # Se este for o único acceptor e tivermos apenas um acceptor, podemos commitar imediatamente
+                if self.acceptor_count == 1 or len(self.proposals[proposal_id]["acceptors"]) >= self.quorum_size:
+                    logger.info(f"Quórum alcançado imediatamente para proposta {proposal_id}: {len(self.proposals[proposal_id]['acceptors'])} acceptors")
+                    
+                    # Marca a proposta como commitada
+                    self.proposals[proposal_id]["committed"] = True
+                    self.proposals[proposal_id]["committed_at"] = time.time()
+                    
+                    # Notifica o cliente
+                    await self._notify_client(client_id, proposal_id, tid, resource_data, "COMMITTED")
+                    
+                    # Notifica os stores
+                    await self._update_stores(proposal_id, tid, resource_data)
+                else:
+                    logger.debug(f"Aguardando mais acceptors para proposta {proposal_id}: {len(self.proposals[proposal_id]['acceptors'])}/{self.quorum_size}")
         
-        # Update statistics
-        self.notifications_processed += 1
-        
-        instance_id = notification.get("instanceId")
-        
-        if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
-            logger.debug(f"Processing notification for instance {instance_id} from acceptor {notification.get('acceptorId')}")
-        
-        self.consensus_manager.register_decision_callback(instance_id, self._on_decision_made)
-
-        # Process notification with consensus manager
-        decision_made = await self.consensus_manager.process_notification(notification)
-        
-        if decision_made:
-            logger.info(f"Decision made for instance {instance_id}")
-
-        return {"accepted": True, "instanceId": instance_id, "learnerId": self.node_id}
+        return {
+            "success": True,
+            "proposal_id": proposal_id,
+            "learner_id": self.id
+        }
     
-    async def _on_decision_made(self, instance_id: int, proposal_number: int, value: Dict[str, Any]):
+    async def _notify_client(self, client_id: str, proposal_id: str, tid: int, 
+                           resource_data: Dict, status: str) -> None:
         """
-        Callback when a decision is made for an instance.
+        Notifica o cliente sobre o resultado de uma proposta.
         
         Args:
-            instance_id: ID of the instance
-            proposal_number: Proposal number that was decided
-            value: Decided value
+            client_id: ID do cliente
+            proposal_id: ID da proposta
+            tid: TID da proposta
+            resource_data: Dados do recurso
+            status: Status da proposta (COMMITTED ou NOT_COMMITTED)
         """
-        logger.info(f"Decision callback for instance {instance_id}, proposal {proposal_number}")
+        # Verifica se conhecemos o cliente
+        if client_id not in self.clients:
+            logger.warning(f"Cliente {client_id} não encontrado. Não é possível notificar sobre proposta {proposal_id}")
+            return
         
-        # Update statistics
-        self.decisions_made += 1
+        client_url = self.clients[client_id]
+        notification_url = f"{client_url}/notify"
         
-        # Process the decided value
-        task = asyncio.create_task(self._process_decided_value(instance_id, proposal_number, value))
-        self._pending_tasks.add(task)
-        task.add_done_callback(self._pending_tasks.discard)
-    
-    async def _process_decided_value(self, instance_id: int, proposal_number: int, value: Dict[str, Any]):
-        """
-        Process a decided value.
+        # Dados da notificação
+        notification_data = {
+            "proposal_id": proposal_id,
+            "tid": tid,
+            "status": status,
+            "resource_data": resource_data,
+            "learner_id": self.id,
+            "timestamp": time.time()
+        }
         
-        Args:
-            instance_id: ID of the instance
-            proposal_number: Proposal number that was decided
-            value: Decided value
-        """
         try:
-            logger.info(f"Processing decided value for instance {instance_id}")
+            # Envia a notificação para o cliente
+            response = await http_request("POST", notification_url, data=notification_data)
             
-            if DEBUG:
-                logger.debug(f"Decided value: {value}")
+            if response.get("success", False):
+                logger.debug(f"Cliente {client_id} notificado com sucesso sobre proposta {proposal_id}")
+            else:
+                logger.warning(f"Falha ao notificar cliente {client_id} sobre proposta {proposal_id}: {response.get('error', 'erro desconhecido')}")
+        except Exception as e:
+            logger.error(f"Erro ao notificar cliente {client_id} sobre proposta {proposal_id}: {str(e)}")
+    
+    async def _update_stores(self, proposal_id: str, tid: int, resource_data: Dict) -> None:
+        """
+        Atualiza os stores com os dados da proposta commitada.
+        
+        Args:
+            proposal_id: ID da proposta
+            tid: TID da proposta
+            resource_data: Dados do recurso
+        """
+        # Preparar as tarefas de atualização para todos os stores
+        update_tasks = []
+        
+        for store_id, url in self.stores.items():
+            update_url = f"{url}/commit"
             
-            # Extract information from value
-            client_id = value.get("clientId")
-            resource_id = value.get("resource", "R")  # Default to "R" per specification
-            operation = value.get("operation", "WRITE")  # Default to "WRITE" per specification
-            data = value.get("data", "")
-            timestamp = value.get("timestamp", current_timestamp())
-            
-            # Determine if this learner should handle client notification
-            should_notify = self._should_handle_client_notification(client_id)
-            
-            # Result to send to client
-            result = {
-                "status": "COMMITTED",
-                "instanceId": instance_id,
-                "resource": resource_id,
-                "timestamp": current_timestamp()
+            update_data = {
+                "proposal_id": proposal_id,
+                "tid": tid,
+                "resource_data": resource_data,
+                "learner_id": self.id,
+                "timestamp": time.time()
             }
             
-            # If using Cluster Store (Part 2)
-            if self.use_cluster_store and self.rowa_manager:
-                # Perform write using ROWA protocol
-                success, write_result = await self.rowa_manager.write_resource(
-                    resource_id, data, client_id, instance_id, timestamp)
-                
-                if not success:
-                    logger.warning(f"Write failed for instance {instance_id}")
-                    result["status"] = "NOT_COMMITTED"
-                    # Adicionar razão da falha pode ser útil para debugging
-                    if DEBUG:
-                        result["reason"] = "Write to Cluster Store failed"
+            task = asyncio.create_task(
+                self._update_store(store_id, update_url, update_data)
+            )
+            update_tasks.append(task)
+        
+        # Aguarda todas as atualizações serem concluídas
+        results = await asyncio.gather(*update_tasks, return_exceptions=True)
+        
+        # Verifica os resultados
+        success_count = 0
+        error_count = 0
+        
+        for result in results:
+            if isinstance(result, Exception):
+                error_count += 1
+            elif result.get("success", False):
+                success_count += 1
             else:
-                # Simulate resource access (Part 1)
-                try:
-                    if self.rowa_manager:
-                        delay = await self.rowa_manager.simulate_resource_access()
-                    else:
-                        delay = await self._simulate_resource_access()
-                    logger.info(f"Simulated resource access for instance {instance_id} took {delay:.3f}s")
-                except Exception as e:
-                    logger.error(f"Error during resource simulation: {e}", exc_info=True)
-                    # Tenta com o método de backup se o principal falhar
-                    if self.rowa_manager and hasattr(self, '_simulate_resource_access'):
-                        logger.info("Trying backup simulation method")
-                        delay = await self._simulate_resource_access()
-                        logger.info(f"Backup simulation took {delay:.3f}s")
-            
-            # Notify client if this learner is responsible
-            if should_notify:
-                # Check if we have client callback information
-                callback_info = self.pending_clients.get(instance_id)
-                
-                if callback_info:
-                    callback_url = callback_info.get("callback_url")
-                    await self._notify_client(callback_url, result)
-                else:
-                    logger.warning(f"No callback information for instance {instance_id}")
-                    
-                    # Try to notify based on client ID
-                    # This is a fallback mechanism and might not work in all cases
-                    if client_id:
-                        logger.info(f"Attempting fallback notification for client {client_id}")
-                        # Construct a likely callback URL based on client ID
-                        # Format might vary based on your actual implementation
-                        callback_url = f"http://{client_id}/notification"
-                        await self._notify_client(callback_url, result)
-            
-            logger.info(f"Completed processing for instance {instance_id} with status {result['status']}")
-            
-        except Exception as e:
-            logger.error(f"Error processing decided value for instance {instance_id}: {e}", exc_info=True)
-    
-    async def _simulate_resource_access(self) -> float:
-        """
-        Simulate access to a resource by waiting a random amount of time.
-        Used in Part 1 when Cluster Store is not available.
+                error_count += 1
         
-        Returns:
-            float: Time spent in seconds
-        """
-        # Wait between 0.2 and 1.0 seconds with millisecond precision
-        delay = random.uniform(0.2, 1.0)
-        await asyncio.sleep(delay)
-        return delay
+        logger.debug(f"Stores atualizados para proposta {proposal_id}: {success_count} sucesso, {error_count} erro")
     
-    async def _notify_client(self, callback_url: str, result: Dict[str, Any]) -> bool:
+    async def _update_store(self, store_id: str, url: str, data: Dict) -> Dict:
         """
-        Notify a client about the result of their request.
+        Atualiza um store específico com os dados da proposta.
         
         Args:
-            callback_url: URL to send notification to
-            result: Result data to send
-            
-        Returns:
-            bool: True if notification was successful, False otherwise
-        """
-        if not callback_url:
-            logger.warning("No callback URL provided for client notification")
-            return False
+            store_id: ID do store
+            url: URL do endpoint commit do store
+            data: Dados da atualização
         
+        Returns:
+            Dict: Resposta do store
+        """
         try:
-            logger.info(f"Notifying client at {callback_url}")
+            response = await http_request("POST", url, data=data)
             
-            if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
-                logger.debug(f"Notification data: {result}")
+            if response.get("success", False):
+                logger.debug(f"Store {store_id} atualizado com sucesso para proposta {data['proposal_id']}")
+            else:
+                logger.warning(f"Falha ao atualizar store {store_id} para proposta {data['proposal_id']}: {response.get('error', 'erro desconhecido')}")
             
-            await self.http_client.post(callback_url, json=result, timeout=5.0)
-            
-            # Update statistics
-            self.client_notifications_sent += 1
-            
-            logger.info(f"Client notification sent successfully to {callback_url}")
-            return True
-            
+            return response
         except Exception as e:
-            # Update statistics
-            self.client_notifications_failed += 1
-            
-            logger.error(f"Failed to notify client at {callback_url}: {e}")
-            return False
+            logger.error(f"Erro ao atualizar store {store_id} para proposta {data['proposal_id']}: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
     
-    def register_client_callback(self, instance_id: int, client_id: str, callback_url: str):
+    def get_proposal_status(self, proposal_id: str) -> Dict:
         """
-        Register a client callback for a specific instance.
+        Obtém o status de uma proposta específica.
         
         Args:
-            instance_id: ID of the instance
-            client_id: ID of the client
-            callback_url: URL to notify when decision is made
+            proposal_id: ID da proposta
+        
+        Returns:
+            Dict: Status da proposta
         """
-        self.pending_clients[instance_id] = {
-            "client_id": client_id,
-            "callback_url": callback_url,
-            "timestamp": current_timestamp()
+        if proposal_id in self.proposals:
+            proposal = self.proposals[proposal_id]
+            
+            return {
+                "proposal_id": proposal_id,
+                "tid": proposal["tid"],
+                "client_id": proposal["client_id"],
+                "acceptors_count": len(proposal["acceptors"]),
+                "committed": proposal.get("committed", False),
+                "timestamp": proposal["timestamp"],
+                "first_learned_at": proposal["first_learned_at"],
+                "committed_at": proposal.get("committed_at")
+            }
+        else:
+            return {
+                "proposal_id": proposal_id,
+                "error": "Proposta não encontrada"
+            }
+    
+    def get_status(self) -> Dict:
+        """
+        Obtém o status do learner.
+        
+        Returns:
+            Dict: Status do learner
+        """
+        # Conta propostas commitadas e pendentes
+        committed_count = 0
+        pending_count = 0
+        
+        for proposal in self.proposals.values():
+            if proposal.get("committed", False):
+                committed_count += 1
+            else:
+                pending_count += 1
+        
+        return {
+            "id": self.id,
+            "acceptor_count": self.acceptor_count,
+            "quorum_size": self.quorum_size,
+            "stores_count": len(self.stores),
+            "clients_count": len(self.clients),
+            "proposals_committed": committed_count,
+            "proposals_pending": pending_count,
+            "total_proposals": len(self.proposals)
         }
-        
-        logger.info(f"Registered client {client_id} for instance {instance_id}")
-    
-    def _should_handle_client_notification(self, client_id: str) -> bool:
-        """
-        Determine if this learner should handle client notification.
-        Based on consistent hashing of client ID.
-        
-        Args:
-            client_id: ID of the client
-            
-        Returns:
-            bool: True if this learner should handle notification, False otherwise
-        """
-        # Constantes segundo a especificação (exatamente 2 learners)
-        TOTAL_LEARNERS = 2
-        
-        if not client_id:
-            # If no client ID, use learner 1 as default
-            return self.node_id == 1
-        
-        # Use consistent hashing to determine responsible learner
-        hash_value = int(hashlib.md5(client_id.encode()).hexdigest(), 16)
-        responsible_learner = (hash_value % TOTAL_LEARNERS) + 1  # Learner IDs are 1-based
-        
-        return self.node_id == responsible_learner
-    
-    def _validate_notification(self, notification: Dict[str, Any]) -> bool:
-        """
-        Validate a notification message.
-        
-        Args:
-            notification: Notification message
-            
-        Returns:
-            bool: True if notification is valid, False otherwise
-        """
-        # Check required fields
-        required_fields = ["instanceId", "proposalNumber", "acceptorId", "accepted", "value", "timestamp"]
-        for field in required_fields:
-            if field not in notification:
-                logger.warning(f"Notification missing required field: {field}")
-                return False
-        
-        # Check that accepted is True (we only care about acceptances)
-        if not notification.get("accepted", False):
-            logger.warning(f"Notification with accepted=False: {notification}")
-            return False
-        
-        return True
-    
-    def get_status(self) -> Dict[str, Any]:
-        """
-        Get the current status of the learner.
-        
-        Returns:
-            Dict[str, Any]: Status information
-        """
-        consensus_stats = self.consensus_manager.get_stats() if self.consensus_manager else {}
-        
-        status = {
-            "node_id": self.node_id,
-            "state": "running" if self.running else "stopped",
-            "active_instances": consensus_stats.get("active_instances", 0),
-            "decided_instances": consensus_stats.get("decided_instances", 0),
-            "notifications_processed": self.notifications_processed,
-            "decisions_made": self.decisions_made,
-            "client_notifications_sent": self.client_notifications_sent,
-            "client_notifications_failed": self.client_notifications_failed,
-            "use_cluster_store": self.use_cluster_store,
-            "timestamp": current_timestamp()
-        }
-        
-        # Add ROWA stats if available
-        if self.rowa_manager:
-            rowa_stats = self.rowa_manager.get_stats()
-            status["rowa"] = rowa_stats
-        
-        return status

@@ -1,133 +1,78 @@
-#!/usr/bin/env python3
-"""
-File: acceptor/main.py
-Entry point for the Acceptor application.
-Responsible for initializing the HTTP server and loading configurations.
-Supports multiple debug levels.
-"""
+import argparse
+import asyncio
+import logging
 import os
 import sys
-import logging
-import asyncio
-import signal
+import time
 import uvicorn
-from fastapi import FastAPI
+from typing import Dict, List
 
-# Add current directory to PYTHONPATH
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # For common modules
+# Add parent directory to path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from api import create_api
-from acceptor import Acceptor
-from persistence import AcceptorPersistence
-from common.logging import setup_logging
+from common.heartbeat import HeartbeatSystem
+from common.utils import get_debug_mode, setup_logging
+from acceptor.api import app, initialize, add_learner
 
-# Load configurations
-NODE_ID = int(os.getenv("NODE_ID", 1))
-PORT = int(os.getenv("PORT", 8080))
-DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
-DEBUG_LEVEL = os.getenv("DEBUG_LEVEL", "basic").lower()  # Levels: basic, advanced, trace
-LEARNERS = os.getenv("LEARNERS", "learner-1:8080,learner-2:8080").split(",")
-LOG_DIR = os.getenv("LOG_DIR", "/data/logs")
-DATA_DIR = os.getenv("DATA_DIR", "/data")
+# Configuração do logger
+logger = logging.getLogger(__name__)
 
-logger = logging.getLogger("acceptor")
-
-async def shutdown(app, persistence, acceptor):
-    """Function to gracefully shut down the service"""
-    logger.important(f"Acceptor {NODE_ID} is being shut down...")
+async def main():
+    """
+    Função principal do componente Acceptor.
+    """
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Acceptor - Paxos Consensus System')
+    parser.add_argument('--id', type=str, help='Unique ID for this acceptor')
+    parser.add_argument('--port', type=int, default=8100, help='Port to run the server on')
+    parser.add_argument('--learners', type=str, help='Comma-separated list of learner URLs')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
     
-    # Save persistent state
-    await persistence.save_state()
-    logger.info("Persistent state saved")
+    args = parser.parse_args()
     
-    # Stop the acceptor
-    await acceptor.stop()
-    logger.info("Acceptor stopped")
+    # Determine debug mode
+    debug = args.debug if args.debug is not None else get_debug_mode()
     
-    logger.important(f"Acceptor {NODE_ID} shut down successfully.")
-
-def main():
-    # Configure the logger with debug level support
-    setup_logging(f"acceptor-{NODE_ID}", debug=DEBUG, debug_level=DEBUG_LEVEL, log_dir=LOG_DIR)
-    logger.important(f"Starting Acceptor {NODE_ID}...")
+    # If ID is not provided, generate one from environment or random
+    acceptor_id = args.id or os.environ.get('ACCEPTOR_ID') or f"acceptor_{int(time.time())}"
     
-    if DEBUG:
-        logger.info(f"DEBUG mode enabled with level: {DEBUG_LEVEL}")
-        logger.info(f"Configuration: PORT={PORT}, LEARNERS={len(LEARNERS)}")
+    # Setup logging
+    setup_logging(f"acceptor_{acceptor_id}", debug)
     
-    # Create data directories if they don't exist
-    os.makedirs(LOG_DIR, exist_ok=True)
-    os.makedirs(DATA_DIR, exist_ok=True)
+    logger.info(f"Starting acceptor {acceptor_id} on port {args.port}")
     
-    # Create persistence manager
-    persistence = AcceptorPersistence(NODE_ID, DATA_DIR)
+    # Initialize the acceptor
+    initialize(acceptor_id, debug)
     
-    # Create acceptor instance
-    acceptor = Acceptor(
-        node_id=NODE_ID,
-        learners=LEARNERS,
-        persistence=persistence
-    )
+    # Parse learners list
+    if args.learners:
+        learners = args.learners.split(',')
+        for i, learner_url in enumerate(learners):
+            learner_id = f"learner_{i+1}"
+            add_learner(learner_id, learner_url.strip())
+    else:
+        # Default learners from environment variables
+        learners_env = os.environ.get('LEARNERS', '')
+        if learners_env:
+            learners = learners_env.split(',')
+            for i, learner_url in enumerate(learners):
+                learner_id = f"learner_{i+1}"
+                add_learner(learner_id, learner_url.strip())
+        else:
+            logger.warning("No learners specified. Using default localhost learners.")
+            for i in range(2):  # Default: 2 learners
+                port = 8200 + i
+                learner_id = f"learner_{i+1}"
+                add_learner(learner_id, f"http://localhost:{port}")
     
-    # Create API
-    app = create_api(acceptor, persistence)
+    # Start the heartbeat system if needed
+    # heartbeat = HeartbeatSystem(acceptor_id, debug)
+    # heartbeat.start()
     
-    # Configure callback for graceful shutdown
-    @app.on_event("shutdown")
-    async def on_shutdown():
-        await shutdown(app, persistence, acceptor)
-    
-    # Startup tasks
-    @app.on_event("startup")
-    async def on_startup():
-        # Start the acceptor
-        await acceptor.start()
-        logger.info("Acceptor started")
-        
-        # Start the persistence loop
-        asyncio.create_task(persistence_loop(persistence, acceptor))
-        logger.info("Persistence loop started")
-    
-    async def persistence_loop(persistence, acceptor):
-        """Loop to periodically save state"""
-        while True:
-            try:
-                await asyncio.sleep(10)  # Save every 10 seconds
-                
-                # Save current state
-                current_state = {
-                    "promises": acceptor.promises,
-                    "accepted": acceptor.accepted,
-                    "prepare_requests_processed": acceptor.prepare_requests_processed,
-                    "accept_requests_processed": acceptor.accept_requests_processed,
-                    "promises_made": acceptor.promises_made,
-                    "proposals_accepted": acceptor.proposals_accepted
-                }
-                
-                if DEBUG and DEBUG_LEVEL == "trace":
-                    logger.debug(f"Saving state: {len(current_state['promises'])} promises, {len(current_state['accepted'])} accepted values")
-                
-                # Save state
-                await persistence.save_state(current_state)
-                
-            except asyncio.CancelledError:
-                logger.info("Persistence loop cancelled")
-                break
-            except Exception as e:
-                logger.error(f"Error saving persistent state: {e}", exc_info=True)
-    
-    # Configure signal handlers for graceful shutdown
-    loop = asyncio.get_event_loop()
-    signals = (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
-    for s in signals:
-        loop.add_signal_handler(
-            s, lambda s=s: asyncio.create_task(shutdown(app, persistence, acceptor))
-        )
-    
-    # Start the server
-    logger.important(f"Acceptor {NODE_ID} started and listening on port {PORT}")
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    # Run the FastAPI server
+    config = uvicorn.Config(app, host="0.0.0.0", port=args.port, log_level="info")
+    server = uvicorn.Server(config)
+    await server.serve()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -1,517 +1,281 @@
-"""
-File: acceptor/acceptor.py
-Implementation of the Acceptor component for the Paxos consensus algorithm.
-Responsible for processing prepare and accept requests from proposers and notifying learners.
-"""
-import os
-import time
-import logging
 import asyncio
-from typing import Dict, List, Any, Optional, Tuple
-from collections import defaultdict
+import logging
+import time
+from typing import Dict, List, Optional, Tuple, Union
 
-from common.communication import HttpClient, CircuitBreaker
-from common.utils import current_timestamp
+from common.utils import http_request
 
-# Configure debug settings
-DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
-DEBUG_LEVEL = os.getenv("DEBUG_LEVEL", "basic").lower()  # Levels: basic, advanced, trace
-
-logger = logging.getLogger("acceptor")
+logger = logging.getLogger(__name__)
 
 class Acceptor:
     """
-    Implementation of the Acceptor in the Paxos consensus algorithm.
-    
-    Responsibilities:
-    1. Process prepare requests from proposers
-    2. Process accept requests from proposers
-    3. Notify learners about accepted proposals
-    4. Maintain persistent state of promises and accepted values
+    Implementação do acceptor do algoritmo Paxos.
+    Responsável por votar em propostas e manter o estado das aceitações.
     """
     
-    def __init__(self, node_id: int, learners: List[str], persistence=None):
-        self.node_id = node_id
-        self.learners = learners if learners else []
-        self.persistence = persistence
-        self._pending_tasks = set()
-        
-        # State structures
-        self.promises = {}  # instanceId -> highest proposal number promised
-        self.accepted = {}  # instanceId -> (proposal_number, value)
-        
-        # Statistics
-        self.prepare_requests_processed = 0
-        self.accept_requests_processed = 0
-        self.promises_made = 0
-        self.proposals_accepted = 0
-        
-        # HTTP client for communication with learners
-        self.http_client = HttpClient()
-        
-        # Circuit breakers for learners
-        self.circuit_breakers = defaultdict(lambda: CircuitBreaker())
-        
-        # NOVA IMPLEMENTAÇÃO: Locks por instância em vez de lock global
-        self.instance_locks = defaultdict(asyncio.Lock)
-        
-        # Lock separado para estatísticas
-        self.stats_lock = asyncio.Lock()
-        
-        # Lock para persistência
-        self.persistence_lock = asyncio.Lock()
-        
-        # Processing flag
-        self.running = False
-        
-        logger.info(f"Acceptor {node_id} initialized with {len(learners)} learners")
-        
-        if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
-            logger.debug(f"Learners: {self.learners}")
-    
-    async def start(self):
-        """Start the acceptor asynchronously."""
-        if self.running:
-            return
-                
-        self.running = True
-        
-        # Load state from persistence if available
-        if self.persistence:
-            # Use synchronous load_state method
-            state = self.persistence.load_state()
-            
-            # Atualizando estado: não precisamos de lock aqui
-            # pois o start é chamado no setup antes de qualquer outro método
-            
-            # Convert keys from strings to integers (JSON serialization effect)
-            self.promises = {int(k): v for k, v in state.get("promises", {}).items()}
-            
-            # Process accepted state properly
-            accepted_dict = state.get("accepted", {})
-            self.accepted = {}
-            for k, v in accepted_dict.items():
-                if isinstance(v, list) and len(v) == 2:
-                    # Handle list format from JSON
-                    self.accepted[int(k)] = (v[0], v[1])
-                else:
-                    # Handle tuple format (caso alternativo)
-                    self.accepted[int(k)] = v
-            
-            # Atualiza estatísticas com lock
-            async with self.stats_lock:
-                self.prepare_requests_processed = state.get("prepare_requests_processed", 0)
-                self.accept_requests_processed = state.get("accept_requests_processed", 0)
-                self.promises_made = state.get("promises_made", 0)
-                self.proposals_accepted = state.get("proposals_accepted", 0)
-            
-            logger.info(f"Loaded state from persistence: {len(self.promises)} promises, {len(self.accepted)} accepted values")
-            
-            if DEBUG and DEBUG_LEVEL == "trace":
-                logger.debug(f"Loaded promises: {self.promises}")
-                logger.debug(f"Loaded accepted values: {self.accepted}")
-        
-        logger.info(f"Acceptor {self.node_id} started")
-    
-    async def stop(self):
-        """Stop the acceptor asynchronously."""
-        if not self.running:
-            return
-            
-        self.running = False
-
-        # Cancela tarefas pendentes com timeout
-        if self._pending_tasks:
-            for task in self._pending_tasks:
-                if not task.done():
-                    task.cancel()
-                    
-            try:
-                # Aguarda cancelamento com timeout
-                await asyncio.wait_for(
-                    asyncio.gather(*self._pending_tasks, return_exceptions=True),
-                    timeout=5.0
-                )
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout aguardando cancelamento de {len(self._pending_tasks)} tarefas")
-            finally:
-                self._pending_tasks.clear()
-        
-        # Persistência final com timeout
-        if self.persistence:
-            try:
-                await asyncio.wait_for(self.save_state(), timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.error(f"Timeout durante persistência final")
-        
-        await self.http_client.close()
-        logger.info(f"Acceptor {self.node_id} stopped")
-    
-    async def save_state(self, timeout_seconds=5.0):
-        """Save acceptor state to persistence asynchronously with timeout."""
-        if not self.persistence:
-            return
-        
-        try:
-            # Use wait_for em vez de timeout contextual
-            async def _save_with_lock():
-                async with self.persistence_lock:
-                    # Captura estatísticas atomicamente
-                    async with self.stats_lock:
-                        prepare_requests = self.prepare_requests_processed
-                        accept_requests = self.accept_requests_processed
-                        promises_made = self.promises_made
-                        proposals_accepted = self.proposals_accepted
-                    
-                    state = {
-                        "promises": self.promises, 
-                        "accepted": self.accepted,
-                        "prepare_requests_processed": prepare_requests,
-                        "accept_requests_processed": accept_requests,
-                        "promises_made": promises_made,
-                        "proposals_accepted": proposals_accepted
-                    }
-                    
-                    await self.persistence.save_state(state)
-                    
-                    if DEBUG and DEBUG_LEVEL == "trace":
-                        logger.debug(f"State saved to persistence: {len(self.promises)} promises, {len(self.accepted)} accepted values")
-                    
-                    return True
-                    
-            await asyncio.wait_for(_save_with_lock(), timeout=timeout_seconds)
-            return True
-        except asyncio.TimeoutError:
-            logger.error(f"Timeout durante operação save_state")
-            return False
-    
-    async def process_prepare(self, prepare_msg: Dict[str, Any]) -> Dict[str, Any]:
+    def __init__(self, acceptor_id: str, debug: bool = False):
         """
-        Process a prepare request from a proposer asynchronously.
+        Inicializa o acceptor.
+        
+        Args:
+            acceptor_id: ID único do acceptor
+            debug: Flag para ativar modo de depuração
         """
-        # Validate required fields
-        required_fields = ["instanceId", "proposalNumber", "proposerId"]
-        for field in required_fields:
-            if field not in prepare_msg:
-                logger.warning(f"Prepare request missing required field: {field}")
-                return {"accepted": False, "reason": f"Missing required field: {field}"}
+        self.id = acceptor_id
+        self.debug = debug
         
-        # Get prepare message details
-        instance_id = prepare_msg.get("instanceId")
-        proposal_number = prepare_msg.get("proposalNumber")
-        proposer_id = prepare_msg.get("proposerId")
+        # Estado do acceptor
+        self.highest_promised_tid = 0  # Maior TID prometido
+        self.accepted_tid = 0  # TID da última proposta aceita
+        self.accepted_value = None  # Valor da última proposta aceita
+        self.accepted_proposal_id = None  # ID da última proposta aceita
         
-        logger.info(f"Processing prepare request for instance {instance_id} with proposal number {proposal_number} from proposer {proposer_id}")
+        # Histórico de propostas
+        self.promises: Dict[str, Dict] = {}  # {proposal_id: {tid, timestamp, ...}}
+        self.accepted: Dict[str, Dict] = {}  # {proposal_id: {tid, value, timestamp, ...}}
         
-        if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
-            logger.debug(f"Full prepare message: {prepare_msg}")
+        # Lista de learners para notificação
+        self.learners: Dict[str, str] = {}  # {learner_id: url}
         
-        # Update statistics atomically
-        async with self.stats_lock:
-            self.prepare_requests_processed += 1
+        # Locks para operações concorrentes
+        self.state_lock = asyncio.Lock()
         
-        # Variáveis para armazenar estado modificado sob lock
-        promise_made = False
-        highest_promised = -1
-        accepted_proposal = -1
-        accepted_value = None
+        logger.debug(f"Acceptor {acceptor_id} inicializado (debug={debug})")
+    
+    def add_learner(self, learner_id: str, url: str) -> None:
+        """
+        Adiciona um learner à lista de learners conhecidos.
         
-        # MODIFICAÇÃO: Usa lock por instância em vez de lock global
-        async with self.instance_locks[instance_id]:
-            # Ensure the instance exists in our state
-            if instance_id not in self.promises:
-                self.promises[instance_id] = -1
-                    
-                if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
-                    logger.debug(f"New instance {instance_id} added to promises with initial value -1")
+        Args:
+            learner_id: ID do learner
+            url: URL base do learner
+        """
+        self.learners[learner_id] = url
+        logger.debug(f"Learner adicionado: {learner_id} -> {url}")
+    
+    async def prepare(self, proposal_id: str, proposer_id: str, tid: int) -> Dict:
+        """
+        Processa uma mensagem PREPARE de um proposer.
+        
+        Args:
+            proposal_id: ID da proposta
+            proposer_id: ID do proposer
+            tid: TID (Transaction ID) da proposta
+        
+        Returns:
+            Dict: Resposta à mensagem PREPARE (promise ou not_promise)
+        """
+        async with self.state_lock:
+            # Se o TID da proposta for menor que o maior TID já prometido, rejeitamos
+            if tid < self.highest_promised_tid:
+                logger.info(f"Rejeitando PREPARE para proposta {proposal_id}: TID={tid} < maior TID prometido={self.highest_promised_tid}")
+                return {
+                    "success": False,
+                    "tid": self.highest_promised_tid,
+                    "message": "not_promise",
+                    "reason": "tid_too_low"
+                }
             
-            highest_promised = self.promises[instance_id]
+            # Atualiza o maior TID prometido
+            self.highest_promised_tid = tid
             
-            # Check if we can promise (proposal number > highest promised)
-            if proposal_number > highest_promised:
-                # Update highest promised
-                self.promises[instance_id] = proposal_number
-                
-                # Update statistics atomically
-                async with self.stats_lock:
-                    self.promises_made += 1
-                
-                promise_made = True
-                
-                if DEBUG:
-                    logger.debug(f"Promise made for instance {instance_id} with proposal number {proposal_number} (previous: {highest_promised})")
-                
-                # Check if we have accepted a value for this instance
-                if instance_id in self.accepted:
-                    accepted_proposal, accepted_value = self.accepted[instance_id]
-                    
-                    if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
-                        logger.debug(f"Previously accepted value for instance {instance_id}: proposal {accepted_proposal}, value: {accepted_value}")
-        
-        # MODIFICAÇÃO CHAVE: Create task for saving state OUTSIDE of the lock
-        if promise_made:
-            save_task = asyncio.create_task(self.save_state())
-            self._pending_tasks.add(save_task)
-            save_task.add_done_callback(self._pending_tasks.discard)
-            
-            # Return promise with any previously accepted value
-            response = {
-                "type": "PROMISE",
-                "accepted": True,
-                "highestAccepted": accepted_proposal,
-                "instanceId": instance_id,
-                "acceptorId": self.node_id
+            # Registra a promessa
+            self.promises[proposal_id] = {
+                "tid": tid,
+                "proposer_id": proposer_id,
+                "timestamp": time.time()
             }
             
-            # Only include acceptedValue if there was one
-            if accepted_value is not None:
-                response["acceptedValue"] = accepted_value
+            # Prepara a resposta com os dados da última proposta aceita (se houver)
+            response = {
+                "success": True,
+                "tid": tid,
+                "message": "promise"
+            }
+            
+            if self.accepted_tid > 0:
+                response["accepted_tid"] = self.accepted_tid
+                response["accepted_value"] = self.accepted_value
+                response["accepted_proposal_id"] = self.accepted_proposal_id
+            
+            logger.info(f"Enviando PROMISE para proposta {proposal_id}: TID={tid}, maior TID aceito={self.accepted_tid}")
             
             return response
-        else:
-            # We've promised to a higher proposal number
-            logger.info(f"Promise rejected for instance {instance_id}: proposal number {proposal_number} <= {highest_promised}")
-            
-            return {
-                "type": "NOT_PROMISE",
-                "accepted": False,
-                "instanceId": instance_id,
-                "acceptorId": self.node_id,
-                "highestPromised": highest_promised
-            }
     
-    async def process_accept(self, accept_msg: Dict[str, Any]) -> Dict[str, Any]:
+    async def accept(self, proposal_id: str, proposer_id: str, tid: int, 
+                   client_id: str, resource_data: Dict, timestamp: int) -> Dict:
         """
-        Process an accept request from a proposer asynchronously.
-        """
-        # Validate required fields
-        required_fields = ["instanceId", "proposalNumber", "proposerId", "value"]
-        for field in required_fields:
-            if field not in accept_msg:
-                logger.warning(f"Accept request missing required field: {field}")
-                return {"accepted": False, "reason": f"Missing required field: {field}"}
-        
-        # Get accept message details
-        instance_id = accept_msg.get("instanceId")
-        proposal_number = accept_msg.get("proposalNumber")
-        proposer_id = accept_msg.get("proposerId")
-        value = accept_msg.get("value")
-        
-        logger.info(f"Processing accept request for instance {instance_id} with proposal number {proposal_number} from proposer {proposer_id}")
-        
-        if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
-            logger.debug(f"Full accept message: {accept_msg}")
-        
-        # Update statistics atomically
-        async with self.stats_lock:
-            self.accept_requests_processed += 1
-        
-        # Variables to track state modifications
-        proposal_accepted = False
-        highest_promised = -1
-        
-        # MODIFICAÇÃO: Usa lock por instância em vez de lock global
-        async with self.instance_locks[instance_id]:
-            # Ensure the instance exists in our state
-            if instance_id not in self.promises:
-                self.promises[instance_id] = -1
-                
-                if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
-                    logger.debug(f"New instance {instance_id} added to promises with initial value -1")
-            
-            highest_promised = self.promises[instance_id]
-            
-            # Check if we can accept (proposal number >= highest promised)
-            if proposal_number >= highest_promised:
-                # Update accepted value
-                self.accepted[instance_id] = (proposal_number, value)
-                self.promises[instance_id] = proposal_number
-                
-                # Update statistics atomically
-                async with self.stats_lock:
-                    self.proposals_accepted += 1
-                
-                proposal_accepted = True
-                
-                logger.info(f"Proposal accepted for instance {instance_id} with proposal number {proposal_number}")
-                
-                if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
-                    logger.debug(f"Accepted value for instance {instance_id}: {value}")
-        
-        # MODIFICAÇÃO CHAVE: Process additional tasks OUTSIDE of lock
-        if proposal_accepted:
-            # Create a task for saving state
-            save_task = asyncio.create_task(self.save_state())
-            self._pending_tasks.add(save_task)
-            save_task.add_done_callback(self._pending_tasks.discard)
-            
-            # Create a task for notifying learners
-            notify_task = asyncio.create_task(self.notify_learners(instance_id, proposal_number, value))
-            self._pending_tasks.add(notify_task)
-            notify_task.add_done_callback(self._pending_tasks.discard)
-            
-            # Return accepted
-            return {
-                "type": "ACCEPTED",
-                "accepted": True,
-                "proposalNumber": proposal_number,
-                "instanceId": instance_id,
-                "acceptorId": self.node_id
-            }
-        else:
-            # We've promised to a higher proposal number
-            logger.info(f"Proposal rejected for instance {instance_id}: proposal number {proposal_number} < {highest_promised}")
-            
-            return {
-                "type": "NOT_ACCEPTED",
-                "accepted": False,
-                "instanceId": instance_id,
-                "acceptorId": self.node_id,
-                "highestPromised": highest_promised
-            }
-    
-    async def notify_learners(self, instance_id: int, proposal_number: int, value: Any):
-        """
-        Notify all learners about an accepted proposal asynchronously.
+        Processa uma mensagem ACCEPT de um proposer.
         
         Args:
-            instance_id: ID of the instance
-            proposal_number: Number of the accepted proposal
-            value: Value that was accepted
+            proposal_id: ID da proposta
+            proposer_id: ID do proposer
+            tid: TID da proposta
+            client_id: ID do cliente
+            resource_data: Dados do recurso
+            timestamp: Timestamp da proposta
+        
+        Returns:
+            Dict: Resposta à mensagem ACCEPT (accepted ou not_accepted)
         """
-        # Create notification message
-        notification = {
-            "type": "LEARN",
-            "instanceId": instance_id,
-            "proposalNumber": proposal_number,
-            "acceptorId": self.node_id,
-            "accepted": True,
-            "value": value,
-            "timestamp": current_timestamp()
+        async with self.state_lock:
+            # Se o TID da proposta for menor que o maior TID já prometido, rejeitamos
+            if tid < self.highest_promised_tid:
+                logger.info(f"Rejeitando ACCEPT para proposta {proposal_id}: TID={tid} < maior TID prometido={self.highest_promised_tid}")
+                return {
+                    "success": False,
+                    "tid": self.highest_promised_tid,
+                    "message": "not_accepted",
+                    "reason": "tid_too_low"
+                }
+            
+            # Aceita a proposta
+            self.accepted_tid = tid
+            self.accepted_value = resource_data
+            self.accepted_proposal_id = proposal_id
+            
+            # Registra a aceitação
+            self.accepted[proposal_id] = {
+                "tid": tid,
+                "proposer_id": proposer_id,
+                "client_id": client_id,
+                "resource_data": resource_data,
+                "timestamp": timestamp,
+                "accepted_at": time.time()
+            }
+            
+            logger.info(f"Aceitando proposta {proposal_id}: TID={tid}")
+            
+            # Notifica os learners
+            await self._notify_learners(proposal_id, tid, proposer_id, client_id, resource_data, timestamp)
+            
+            return {
+                "success": True,
+                "tid": tid,
+                "message": "accepted"
+            }
+    
+    async def _notify_learners(self, proposal_id: str, tid: int, proposer_id: str, 
+                           client_id: str, resource_data: Dict, timestamp: int) -> None:
+        """
+        Notifica os learners sobre uma proposta aceita.
+        
+        Args:
+            proposal_id: ID da proposta
+            tid: TID da proposta
+            proposer_id: ID do proposer
+            client_id: ID do cliente
+            resource_data: Dados do recurso
+            timestamp: Timestamp da proposta
+        """
+        # Dados para os learners
+        learn_data = {
+            "proposal_id": proposal_id,
+            "acceptor_id": self.id,
+            "proposer_id": proposer_id,
+            "tid": tid,
+            "client_id": client_id,
+            "resource_data": resource_data,
+            "timestamp": timestamp
         }
         
-        logger.info(f"Notifying {len(self.learners)} learners about acceptance of instance {instance_id}")
+        # Notifica todos os learners em paralelo
+        notification_tasks = []
         
-        # Send notification to all learners
-        tasks = []
-        for learner in self.learners:
-            if not learner:  # Skip empty addresses
-                continue
-                
-            cb = self.circuit_breakers[learner]
+        for learner_id, url in self.learners.items():
+            learn_url = f"{url}/learn"
             
-            # Skip if circuit breaker is open
-            if not cb.allow_request():
-                logger.warning(f"Circuit breaker open for learner {learner}, skipping notification")
-                continue
-            
-            # Send notification with circuit breaker
-            tasks.append(self._notify_learner(learner, notification, cb))
+            task = asyncio.create_task(
+                self._send_notification(learner_id, learn_url, learn_data)
+            )
+            notification_tasks.append(task)
         
-        # Wait for all notifications to complete
-        if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Count successes
-            success_count = sum(1 for r in results if r is True)
-            
-            logger.info(f"Learner notification complete: {success_count}/{len(tasks)} successful")
-        else:
-            logger.warning("No learners to notify")
+        # Aguarda todas as notificações serem enviadas
+        results = await asyncio.gather(*notification_tasks, return_exceptions=True)
+        
+        # Verifica os resultados
+        success_count = 0
+        error_count = 0
+        
+        for result in results:
+            if isinstance(result, Exception):
+                error_count += 1
+            elif result.get("success", False):
+                success_count += 1
+            else:
+                error_count += 1
+        
+        logger.debug(f"Notificações enviadas para {len(notification_tasks)} learners: {success_count} sucesso, {error_count} erro")
     
-    async def _notify_learner(self, learner: str, notification: Dict[str, Any], circuit_breaker: CircuitBreaker) -> bool:
+    async def _send_notification(self, learner_id: str, url: str, data: Dict) -> Dict:
         """
-        Send notification to a specific learner with error handling asynchronously.
+        Envia uma notificação para um learner específico.
         
         Args:
-            learner: Learner address
-            notification: Notification message
-            circuit_breaker: Circuit breaker for this learner
-            
+            learner_id: ID do learner
+            url: URL do endpoint learn do learner
+            data: Dados da notificação
+        
         Returns:
-            bool: True if notification was successful, False otherwise
+            Dict: Resposta do learner
         """
         try:
-            url = f"http://{learner}/learn"
-            
-            if DEBUG and DEBUG_LEVEL == "trace":
-                logger.debug(f"Sending notification to {url}: {notification}")
-            
-            # Send notification with timeout
-            await self.http_client.post(url, json=notification, timeout=1.0)
-            
-            # Record success in circuit breaker
-            await circuit_breaker.record_success()
-            
-            if DEBUG:
-                logger.debug(f"Notification to learner {learner} successful")
-            
-            return True
-            
+            response = await http_request("POST", url, data=data)
+            if self.debug:
+                logger.debug(f"Notificação enviada para learner {learner_id}: {response}")
+            return response
         except Exception as e:
-            # Record failure in circuit breaker
-            await circuit_breaker.record_failure()
-            
-            logger.error(f"Failed to notify learner {learner}: {e}")
-            return False
+            logger.error(f"Erro ao notificar learner {learner_id}: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
     
-    def get_status(self) -> Dict[str, Any]:
+    def get_status(self) -> Dict:
         """
-        Get the current status of the acceptor synchronously.
+        Obtém o status atual do acceptor.
         
         Returns:
-            Dict[str, Any]: Status information
+            Dict: Status do acceptor
         """
-        # Calcular instance_id_range de maneira segura
-        if self.promises:
-            try:
-                min_id = min(self.promises.keys())
-                max_id = max(self.promises.keys())
-                instance_id_range = f"{min_id}-{max_id}"
-            except (ValueError, TypeError):
-                # Lidar com casos em que as chaves não são iteráveis ou estão vazias
-                instance_id_range = "N/A-N/A"
-        else:
-            instance_id_range = "N/A-N/A"
-        
         return {
-            "node_id": self.node_id,
-            "state": "running" if self.running else "stopped",
-            "learners": len(self.learners),
-            "active_instances": len(self.promises),
-            "accepted_instances": len(self.accepted),
-            "prepare_requests_processed": self.prepare_requests_processed,
-            "accept_requests_processed": self.accept_requests_processed,
-            "promises_made": self.promises_made,
-            "proposals_accepted": self.proposals_accepted,
-            "instance_id_range": instance_id_range,
-            "timestamp": current_timestamp()
+            "id": self.id,
+            "highest_promised_tid": self.highest_promised_tid,
+            "accepted_tid": self.accepted_tid,
+            "accepted_proposal_id": self.accepted_proposal_id,
+            "active_promises": len(self.promises),
+            "total_accepted": len(self.accepted),
+            "learners_count": len(self.learners)
         }
     
-    def get_instance_info(self, instance_id: int) -> Dict[str, Any]:
+    def get_proposal_status(self, proposal_id: str) -> Dict:
         """
-        Get information about a specific instance synchronously.
+        Obtém o status de uma proposta específica.
         
         Args:
-            instance_id: ID of the instance
-            
+            proposal_id: ID da proposta
+        
         Returns:
-            Dict[str, Any]: Instance information or empty dict if not found
+            Dict: Status da proposta
         """
-        if instance_id not in self.promises:
-            return {}
-            
-        info = {
-            "instanceId": instance_id,
-            "highestPromised": self.promises[instance_id]
+        result = {
+            "proposal_id": proposal_id
         }
         
-        if instance_id in self.accepted:
-            proposal_number, value = self.accepted[instance_id]
-            info["accepted"] = True
-            info["proposalNumber"] = proposal_number
-            info["value"] = value
-        else:
-            info["accepted"] = False
-            
-        return info
+        # Verifica se temos uma promessa para esta proposta
+        if proposal_id in self.promises:
+            result["promise"] = self.promises[proposal_id]
+        
+        # Verifica se temos uma aceitação para esta proposta
+        if proposal_id in self.accepted:
+            result["accepted"] = self.accepted[proposal_id]
+        
+        # Se não temos nenhuma informação sobre esta proposta
+        if len(result) == 1:
+            result["status"] = "unknown"
+        elif "accepted" in result:
+            result["status"] = "accepted"
+        elif "promise" in result:
+            result["status"] = "promised"
+        
+        return result

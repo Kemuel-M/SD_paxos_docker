@@ -1,215 +1,261 @@
-"""
-File: learner/api.py
-Implementation of the REST API endpoints for the Learner component.
-With improved logging and debug control.
-"""
-import os
-import time
-import logging
 import asyncio
-from typing import Dict, Any, List, Optional
-from fastapi import FastAPI, HTTPException, Body, BackgroundTasks, Query, Depends
-from pydantic import BaseModel, Field
+import json
+import logging
+import time
+from typing import Dict, List, Optional
 
-# Enhanced debug configuration
-DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
-DEBUG_LEVEL = os.getenv("DEBUG_LEVEL", "basic").lower()  # Levels: basic, advanced, trace
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
-logger = logging.getLogger("learner")
+from common.utils import get_debug_mode, setup_logging
+from learner.learner import Learner
+from learner.rowa import ROWAManager
 
-# Data models for the API
+# Configura o logger
+logger = logging.getLogger(__name__)
+
+# Modelos de dados para as requisições e respostas
 class LearnRequest(BaseModel):
-    type: str = Field("LEARN", description="Message type")
-    proposalNumber: int = Field(..., description="Proposal number")
-    instanceId: int = Field(..., description="Instance ID")
-    acceptorId: int = Field(..., description="ID of the acceptor")
-    accepted: bool = Field(..., description="Whether the proposal was accepted")
-    value: Dict[str, Any] = Field(..., description="Proposed value")
-    timestamp: int = Field(..., description="Timestamp of the acceptance")
+    proposal_id: str
+    acceptor_id: str
+    proposer_id: str
+    tid: int
+    client_id: str
+    resource_data: Dict
+    timestamp: int
+
+class LearnResponse(BaseModel):
+    success: bool
+    proposal_id: str
+    learner_id: str
 
 class StatusResponse(BaseModel):
-    node_id: int = Field(..., description="ID of this learner")
-    state: str = Field(..., description="Current state of the learner (running/stopped)")
-    active_instances: int = Field(..., description="Number of active Paxos instances")
-    decided_instances: int = Field(..., description="Number of instances with decided values")
-    notifications_processed: int = Field(..., description="Total notifications processed")
-    decisions_made: int = Field(..., description="Total decisions made")
-    uptime: float = Field(..., description="Time running in seconds")
-    use_cluster_store: bool = Field(..., description="Whether Cluster Store is being used")
+    id: str
+    acceptor_count: int
+    quorum_size: int
+    stores_count: int
+    clients_count: int
+    proposals_committed: int
+    proposals_pending: int
+    total_proposals: int
+    rowa_enabled: bool
 
 class HealthResponse(BaseModel):
-    status: str = Field(..., description="Health status of the service")
-    timestamp: int = Field(..., description="Current timestamp")
-    debug_enabled: bool = Field(..., description="Debug mode status")
-    debug_level: str = Field(..., description="Current debug level")
+    status: str
+    timestamp: float
 
-class DebugConfigRequest(BaseModel):
-    enabled: bool = Field(..., description="Enable or disable debug")
-    level: str = Field("basic", description="Debug level (basic, advanced, trace)")
+# Variáveis globais para instâncias de Learner e ROWAManager
+learner: Optional[Learner] = None
+rowa_manager: Optional[ROWAManager] = None
 
-def get_current_debug_state():
+# Cria a aplicação FastAPI
+app = FastAPI(title="Learner API")
+
+# Middleware para logging de requisições
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    # Obtém o corpo da requisição
+    body = b""
+    async for chunk in request.body():
+        body += chunk
+    
+    # Reconstrói o stream de requisição para ser consumido novamente
+    request._body = body
+    
+    # Log da requisição
+    method = request.method
+    url = request.url
+    logger.debug(f"Requisição recebida: {method} {url}")
+    
+    if get_debug_mode() and body:
+        try:
+            body_str = body.decode('utf-8')
+            if body_str:
+                body_json = json.loads(body_str)
+                logger.debug(f"Corpo da requisição: {json.dumps(body_json, indent=2)}")
+        except Exception as e:
+            logger.debug(f"Corpo da requisição não é JSON válido: {body}")
+    
+    # Processa a requisição
+    response = await call_next(request)
+    
+    # Log da resposta
+    status_code = response.status_code
+    logger.debug(f"Resposta enviada: {status_code}")
+    
+    return response
+
+# Rotas da API
+@app.post("/learn", response_model=LearnResponse)
+async def learn_endpoint(request: LearnRequest):
     """
-    Return the current debug state for use in endpoints.
+    Endpoint para aprender sobre uma proposta aceita.
     """
-    from common.logging import DEBUG, DEBUG_LEVEL
+    if not learner:
+        raise HTTPException(status_code=500, detail="Learner não inicializado")
+    
+    # Processa a mensagem LEARN
+    if rowa_manager and rowa_manager.is_enabled():
+        # Usa o protocolo ROWA se estiver habilitado
+        result = await rowa_manager.process_learn(
+            request.proposal_id, request.acceptor_id, request.proposer_id,
+            request.tid, request.client_id, request.resource_data, request.timestamp
+        )
+    else:
+        # Usa o learner padrão
+        result = await learner.learn(
+            request.proposal_id, request.acceptor_id, request.proposer_id,
+            request.tid, request.client_id, request.resource_data, request.timestamp
+        )
+    
+    # Retorna o resultado
+    return result
+
+@app.get("/status", response_model=StatusResponse)
+async def status_endpoint():
+    """
+    Endpoint para obter o status do learner.
+    """
+    if not learner:
+        raise HTTPException(status_code=500, detail="Learner não inicializado")
+    
+    # Obtém o status do learner
+    status = learner.get_status()
+    
+    # Adiciona informações do ROWA
+    status["rowa_enabled"] = rowa_manager.is_enabled() if rowa_manager else False
+    
+    # Retorna o status
+    return status
+
+@app.get("/health", response_model=HealthResponse)
+async def health_endpoint():
+    """
+    Endpoint para verificar a saúde do learner.
+    """
+    # Retorna sempre saudável com o timestamp atual
     return {
-        "enabled": DEBUG,
-        "level": DEBUG_LEVEL
+        "status": "healthy",
+        "timestamp": time.time()
     }
 
-def create_api(learner, consensus_manager, rowa_manager=None):
+@app.get("/logs", response_class=Response)
+async def logs_endpoint(lines: int = 100):
     """
-    Create the FastAPI application for the Learner.
+    Endpoint para obter os logs do learner.
+    """
+    try:
+        # Obtém os N últimos logs do arquivo
+        log_file = "logs/learner.log"
+        with open(log_file, "r") as f:
+            logs = f.readlines()
+            last_logs = logs[-lines:] if len(logs) >= lines else logs
+        
+        # Formata os logs
+        formatted_logs = "".join(last_logs)
+        
+        # Retorna os logs como texto
+        return Response(content=formatted_logs, media_type="text/plain")
+    except Exception as e:
+        logger.error(f"Erro ao obter logs: {str(e)}")
+        return Response(content=f"Erro ao obter logs: {str(e)}", media_type="text/plain", status_code=500)
+
+@app.get("/proposals/{proposal_id}")
+async def get_proposal_endpoint(proposal_id: str):
+    """
+    Endpoint para obter o status de uma proposta específica.
+    """
+    if not learner:
+        raise HTTPException(status_code=500, detail="Learner não inicializado")
+    
+    # Obtém o status da proposta
+    proposal_status = learner.get_proposal_status(proposal_id)
+    
+    # Se a proposta não foi encontrada, retorna um erro
+    if "error" in proposal_status:
+        raise HTTPException(status_code=404, detail=proposal_status["error"])
+    
+    # Retorna o status da proposta
+    return proposal_status
+
+@app.post("/toggle_rowa")
+async def toggle_rowa_endpoint(enable: bool):
+    """
+    Endpoint para ativar ou desativar o protocolo ROWA.
+    """
+    if not rowa_manager:
+        raise HTTPException(status_code=500, detail="ROWA Manager não inicializado")
+    
+    # Ativa ou desativa o ROWA
+    rowa_manager.set_enabled(enable)
+    
+    # Retorna o novo estado
+    return {
+        "rowa_enabled": rowa_manager.is_enabled(),
+        "message": f"Protocolo ROWA {'ativado' if enable else 'desativado'}"
+    }
+
+# Funções para inicialização
+def initialize(learner_id: str, debug: bool = None):
+    """
+    Inicializa o learner e o ROWA manager.
     
     Args:
-        learner: Instance of the Learner
-        consensus_manager: Instance of ConsensusManager
-        rowa_manager: Instance of RowaManager (optional)
-    
-    Returns:
-        FastAPI: Configured FastAPI application
+        learner_id: ID do learner
+        debug: Flag para ativar modo de depuração
     """
-    app = FastAPI(title="Learner API", description="API for the Learner component of the Paxos consensus system")
-    start_time = time.time()
+    global learner, rowa_manager
     
-    # Endpoint for learn notifications
-    @app.post("/learn")
-    async def learn(request: LearnRequest):
-        if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
-            logger.debug(f"Received learn notification: {request.dict()}")
-            
-        logger.info(f"Received learn notification for instance {request.instanceId} from acceptor {request.acceptorId}")
-        
-        # Process the learn notification asynchronously
-        result = await learner.process_learn_notification(request.dict())
-        
-        return result
+    # Configura o logging
+    if debug is None:
+        debug = get_debug_mode()
     
-    # Endpoint for learner status
-    @app.get("/status", response_model=StatusResponse)
-    async def get_status():
-        # Get status synchronously
-        status = learner.get_status()
-        # Calculate uptime synchronously
-        status["uptime"] = time.time() - start_time
-        return status
+    setup_logging(f"learner_{learner_id}", debug)
     
-    # Endpoint for health check (heartbeat)
-    @app.get("/health", response_model=HealthResponse)
-    async def health_check(debug_state: Dict = Depends(get_current_debug_state)):
-        return {
-            "status": "healthy",
-            "timestamp": int(time.time() * 1000),
-            "debug_enabled": debug_state["enabled"],
-            "debug_level": debug_state["level"]
-        }
+    # Cria as instâncias
+    learner = Learner(learner_id, debug)
+    rowa_manager = ROWAManager(learner_id, debug)
     
-    # Endpoint for getting instance information
-    @app.get("/instance/{instance_id}")
-    async def get_instance(instance_id: int):
-        # Get instance info synchronously
-        info = consensus_manager.get_instance_info(instance_id)
-        
-        if not info:
-            raise HTTPException(status_code=404, detail=f"Instance {instance_id} not found")
-            
-        return info
+    logger.info(f"Learner {learner_id} inicializado (debug={debug})")
+
+def set_acceptor_count(count: int):
+    """
+    Define o número total de acceptors.
     
-    # Endpoint for listing active instances
-    @app.get("/instances")
-    async def list_instances(limit: int = Query(10, ge=1, le=100), 
-                           offset: int = Query(0, ge=0),
-                           decided_only: bool = Query(False)):
-        """List active Paxos instances."""
-        instances = []
-        
-        # Get all instance IDs
-        instance_ids = consensus_manager.get_all_instance_ids(decided_only)
-        
-        # Sort instance IDs
-        sorted_ids = sorted(instance_ids, reverse=True)
-        
-        # Apply pagination
-        paginated_ids = sorted_ids[offset:offset+limit]
-        
-        # Get info for each instance
-        for instance_id in paginated_ids:
-            instances.append(consensus_manager.get_instance_info(instance_id))
-        
-        return {
-            "instances": instances,
-            "total": len(sorted_ids),
-            "offset": offset,
-            "limit": limit
-        }
+    Args:
+        count: Número total de acceptors
+    """
+    if learner:
+        learner.set_acceptor_count(count)
     
-    # Endpoint to configure debug settings
-    @app.post("/debug/config")
-    async def configure_debug(config: DebugConfigRequest):
-        """Configure debug mode at runtime."""
-        if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
-            logger.debug(f"Changing debug configuration: {config.dict()}")
-            
-        # Import and use the logging module to configure debug
-        from common.logging import set_debug_level
-        set_debug_level(config.enabled, config.level)
-        
-        logger.important(f"Debug configuration changed: enabled={config.enabled}, level={config.level}")
-        return {"status": "success", "debug": {"enabled": config.enabled, "level": config.level}}
+    if rowa_manager:
+        rowa_manager.set_acceptor_count(count)
+
+def add_store(store_id: str, url: str):
+    """
+    Adiciona um store ao learner e ao ROWA manager.
     
-    # Endpoints for logs
-    @app.get("/logs")
-    async def get_logs(limit: int = Query(100, ge=1, le=1000)):
-        """Return learner logs. Available only when DEBUG=true."""
-        from common.logging import get_log_entries
-        
-        if not DEBUG:
-            raise HTTPException(status_code=403, detail="DEBUG mode not enabled")
-        
-        return {"logs": get_log_entries("learner", limit=limit)}
+    Args:
+        store_id: ID do store
+        url: URL base do store
+    """
+    if learner:
+        learner.add_store(store_id, url)
     
-    @app.get("/logs/important")
-    async def get_important_logs(limit: int = Query(100, ge=1, le=1000)):
-        """Return important learner logs."""
-        from common.logging import get_important_log_entries
-        return {"logs": get_important_log_entries("learner", limit=limit)}
+    if rowa_manager:
+        rowa_manager.add_store(store_id, url)
+
+def add_client(client_id: str, url: str):
+    """
+    Adiciona um cliente ao learner e ao ROWA manager.
     
-    # Endpoint for getting stats
-    @app.get("/stats")
-    async def get_stats():
-        """Return learner statistics."""
-        # Use synchronous get_status to get all required data at once
-        status = learner.get_status()
-        
-        stats = {
-            # Keep using start time for uptime
-            "uptime": time.time() - start_time,
-            
-            # Use only data from the status method
-            "node_id": status["node_id"],
-            "notifications_processed": status["notifications_processed"],
-            "decisions_made": status["decisions_made"],
-            "active_instances": status["active_instances"],
-            "decided_instances": status["decided_instances"],
-            "use_cluster_store": status["use_cluster_store"]
-        }
-        
-        # Add ROWA statistics if available
-        if rowa_manager:
-            rowa_stats = rowa_manager.get_stats()
-            stats["rowa"] = {
-                "reads_processed": rowa_stats["reads_processed"],
-                "writes_processed": rowa_stats["writes_processed"],
-                "write_successes": rowa_stats["write_successes"],
-                "write_failures": rowa_stats["write_failures"]
-            }
-        
-        # Optional: add system load information
-        if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
-            stats["memory_usage"] = {
-                "instances_size": consensus_manager.get_memory_usage()
-            }
-        
-        return {"stats": stats}
+    Args:
+        client_id: ID do cliente
+        url: URL base do cliente
+    """
+    if learner:
+        learner.add_client(client_id, url)
     
-    return app
+    if rowa_manager:
+        rowa_manager.add_client(client_id, url)

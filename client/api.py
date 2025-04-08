@@ -1,135 +1,297 @@
-"""
-API REST do cliente para receber notificações do learner.
-"""
-import os
-import time
-import logging
 import asyncio
-from typing import Dict, Any, List, Optional
-from fastapi import FastAPI, HTTPException, Body, Depends, Query
-from pydantic import BaseModel, Field
+import json
+import logging
+import time
+from typing import Dict, List, Optional
 
-# Configuração de debug
-DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
-DEBUG_LEVEL = os.getenv("DEBUG_LEVEL", "basic").lower()  # Níveis: basic, advanced, trace
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
-logger = logging.getLogger("client")
+from client.client import Client
+from common.utils import get_debug_mode, setup_logging
 
-# Modelos de dados para a API
-class NotificationRequest(BaseModel):
-    status: str = Field(..., description="Status da operação (COMMITTED/NOT_COMMITTED)")
-    instanceId: int = Field(..., description="ID da instância Paxos")
-    resource: str = Field(..., description="Identificador do recurso")
-    timestamp: int = Field(..., description="Timestamp da operação em milissegundos")
+# Configura o logger
+logger = logging.getLogger(__name__)
 
-class OperationRequest(BaseModel):
-    data: str = Field(..., description="Dados para escrever no recurso")
+# Modelos de dados para as requisições e respostas
+class NotifyRequest(BaseModel):
+    proposal_id: str
+    tid: int
+    status: str
+    resource_data: Dict
+    learner_id: str
+    timestamp: float
+    protocol: Optional[str] = None
+
+class NotifyResponse(BaseModel):
+    success: bool
+    proposal_id: str
+    client_id: str
+
+class RequestData(BaseModel):
+    resource_data: Optional[Dict] = None
+
+class RequestResponse(BaseModel):
+    success: bool
+    proposal_id: Optional[str] = None
+    error: Optional[str] = None
+
+class StartRandomRequestsRequest(BaseModel):
+    num_requests: Optional[int] = None
 
 class StatusResponse(BaseModel):
-    client_id: str = Field(..., description="ID do cliente")
-    proposer_url: str = Field(..., description="URL do proposer designado")
-    total_operations: int = Field(..., description="Total de operações planejadas")
-    completed: int = Field(..., description="Operações concluídas com sucesso")
-    failed: int = Field(..., description="Operações falhas")
-    in_progress: int = Field(..., description="Operações em andamento")
-    avg_latency: float = Field(..., description="Latência média em segundos")
-    runtime: float = Field(..., description="Tempo de execução em segundos")
-    running: bool = Field(..., description="Se o cliente está em execução")
+    id: str
+    running: bool
+    total_requests: int
+    successful_requests: int
+    failed_requests: int
+    proposer_url: Optional[str]
+    min_wait: float
+    max_wait: float
+    min_requests: int
+    max_requests: int
 
-def create_api(client):
+class HealthResponse(BaseModel):
+    status: str
+    timestamp: float
+
+# Variável global para a instância do Client
+client: Optional[Client] = None
+
+# Cria a aplicação FastAPI
+app = FastAPI(title="Client API")
+
+# Middleware para logging de requisições
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    # Obtém o corpo da requisição
+    body = b""
+    async for chunk in request.body():
+        body += chunk
+    
+    # Reconstrói o stream de requisição para ser consumido novamente
+    request._body = body
+    
+    # Log da requisição
+    method = request.method
+    url = request.url
+    logger.debug(f"Requisição recebida: {method} {url}")
+    
+    if get_debug_mode() and body:
+        try:
+            body_str = body.decode('utf-8')
+            if body_str:
+                body_json = json.loads(body_str)
+                logger.debug(f"Corpo da requisição: {json.dumps(body_json, indent=2)}")
+        except Exception as e:
+            logger.debug(f"Corpo da requisição não é JSON válido: {body}")
+    
+    # Processa a requisição
+    response = await call_next(request)
+    
+    # Log da resposta
+    status_code = response.status_code
+    logger.debug(f"Resposta enviada: {status_code}")
+    
+    return response
+
+# Rotas da API
+@app.post("/notify", response_model=NotifyResponse)
+async def notify_endpoint(request: NotifyRequest):
     """
-    Cria a API FastAPI para o cliente.
+    Endpoint para receber notificações dos learners.
+    """
+    if not client:
+        raise HTTPException(status_code=500, detail="Cliente não inicializado")
+    
+    # Processa a notificação
+    result = await client.handle_notification(
+        request.proposal_id, request.tid, request.status,
+        request.resource_data, request.learner_id, request.timestamp,
+        request.protocol
+    )
+    
+    # Retorna o resultado
+    return result
+
+@app.post("/request", response_model=RequestResponse)
+async def request_endpoint(request: RequestData = None):
+    """
+    Endpoint para enviar um pedido de acesso ao recurso R.
+    """
+    if not client:
+        raise HTTPException(status_code=500, detail="Cliente não inicializado")
+    
+    # Envia o pedido
+    result = await client.send_request(
+        resource_data=request.resource_data if request else None
+    )
+    
+    # Retorna o resultado
+    return result
+
+@app.post("/start")
+async def start_endpoint(request: StartRandomRequestsRequest = None):
+    """
+    Endpoint para iniciar o loop de envio de pedidos aleatórios.
+    """
+    if not client:
+        raise HTTPException(status_code=500, detail="Cliente não inicializado")
+    
+    # Inicia o loop de pedidos
+    num_requests = request.num_requests if request else None
+    await client.start_random_requests(num_requests)
+    
+    # Retorna o status
+    return {
+        "success": True,
+        "message": f"Iniciado envio de {num_requests or 'N'} pedidos aleatórios"
+    }
+
+@app.post("/stop")
+async def stop_endpoint():
+    """
+    Endpoint para parar o loop de envio de pedidos.
+    """
+    if not client:
+        raise HTTPException(status_code=500, detail="Cliente não inicializado")
+    
+    # Para o loop de pedidos
+    client.stop_requests()
+    
+    # Retorna o status
+    return {
+        "success": True,
+        "message": "Envio de pedidos interrompido"
+    }
+
+@app.get("/status", response_model=StatusResponse)
+async def status_endpoint():
+    """
+    Endpoint para obter o status do cliente.
+    """
+    if not client:
+        raise HTTPException(status_code=500, detail="Cliente não inicializado")
+    
+    # Obtém o status do cliente
+    status = client.get_status()
+    
+    # Retorna o status
+    return status
+
+@app.get("/health", response_model=HealthResponse)
+async def health_endpoint():
+    """
+    Endpoint para verificar a saúde do cliente.
+    """
+    # Retorna sempre saudável com o timestamp atual
+    return {
+        "status": "healthy",
+        "timestamp": time.time()
+    }
+
+@app.get("/logs", response_class=Response)
+async def logs_endpoint(lines: int = 100):
+    """
+    Endpoint para obter os logs do cliente.
+    """
+    try:
+        # Obtém os N últimos logs do arquivo
+        log_file = "logs/client.log"
+        with open(log_file, "r") as f:
+            logs = f.readlines()
+            last_logs = logs[-lines:] if len(logs) >= lines else logs
+        
+        # Formata os logs
+        formatted_logs = "".join(last_logs)
+        
+        # Retorna os logs como texto
+        return Response(content=formatted_logs, media_type="text/plain")
+    except Exception as e:
+        logger.error(f"Erro ao obter logs: {str(e)}")
+        return Response(content=f"Erro ao obter logs: {str(e)}", media_type="text/plain", status_code=500)
+
+@app.get("/history")
+async def history_endpoint(limit: int = 10):
+    """
+    Endpoint para obter o histórico de pedidos.
+    """
+    if not client:
+        raise HTTPException(status_code=500, detail="Cliente não inicializado")
+    
+    # Obtém os N últimos pedidos do histórico
+    history = client.requests[-limit:] if len(client.requests) > limit else client.requests
+    
+    # Retorna o histórico
+    return {
+        "history": history,
+        "total": len(client.requests)
+    }
+
+@app.put("/config")
+async def config_endpoint(min_wait: float = None, max_wait: float = None, 
+                      min_requests: int = None, max_requests: int = None):
+    """
+    Endpoint para configurar os parâmetros do cliente.
+    """
+    if not client:
+        raise HTTPException(status_code=500, detail="Cliente não inicializado")
+    
+    # Atualiza os parâmetros
+    if min_wait is not None:
+        client.min_wait = min_wait
+    
+    if max_wait is not None:
+        client.max_wait = max_wait
+    
+    if min_requests is not None:
+        client.min_requests = min_requests
+    
+    if max_requests is not None:
+        client.max_requests = max_requests
+    
+    # Retorna os novos parâmetros
+    return {
+        "min_wait": client.min_wait,
+        "max_wait": client.max_wait,
+        "min_requests": client.min_requests,
+        "max_requests": client.max_requests
+    }
+
+# Funções para inicialização
+def initialize(client_id: str, proposer_url: str = None, debug: bool = None):
+    """
+    Inicializa o cliente.
     
     Args:
-        client: Instância do PaxosClient
-    
-    Returns:
-        FastAPI: Aplicação FastAPI configurada
+        client_id: ID do cliente
+        proposer_url: URL base do proposer
+        debug: Flag para ativar modo de depuração
     """
-    app = FastAPI(title="Client API", description="API para o componente Client do sistema Paxos")
+    global client
     
-    # Endpoint para receber notificações dos learners
-    @app.post("/notification")
-    async def notification(notification: NotificationRequest):
-        """Recebe notificação do learner sobre resultado da operação."""
-        if DEBUG:
-            logger.debug(f"Recebida notificação: {notification.dict()}")
-            
-        logger.info(f"Recebida notificação para instância {notification.instanceId}: {notification.status}")
-        
-        # Processa notificação no cliente
-        result = client.process_notification(notification.dict())
-        
-        return result
+    # Configura o logging
+    if debug is None:
+        debug = get_debug_mode()
     
-    # Endpoint para obter status do cliente
-    @app.get("/status", response_model=StatusResponse)
-    async def get_status():
-        """Retorna status atual do cliente."""
-        return client.get_status()
+    setup_logging(f"client_{client_id}", debug)
     
-    # Endpoint para verificação de saúde (heartbeat)
-    @app.get("/health")
-    async def health_check():
-        """Endpoint de verificação de saúde."""
-        return {
-            "status": "healthy",
-            "timestamp": int(time.time() * 1000)
-        }
+    # Cria a instância do cliente
+    client = Client(client_id, debug)
     
-    # Endpoint para obter histórico de operações
-    @app.get("/history")
-    async def get_history(limit: int = Query(100, ge=1, le=1000)):
-        """Retorna histórico de operações do cliente."""
-        return {"operations": client.get_history(limit)}
+    # Define o proposer, se fornecido
+    if proposer_url:
+        client.set_proposer(proposer_url)
     
-    # Endpoint para obter detalhes de uma operação específica
-    @app.get("/operation/{operation_id}")
-    async def get_operation(operation_id: int):
-        """Retorna detalhes de uma operação específica."""
-        operation = client.get_operation(operation_id)
-        if not operation:
-            raise HTTPException(status_code=404, detail=f"Operação {operation_id} não encontrada")
-        return operation
+    logger.info(f"Cliente {client_id} inicializado (debug={debug})")
+
+def set_proposer(url: str):
+    """
+    Define o proposer que este cliente conhece.
     
-    # Endpoint para iniciar operação manual
-    @app.post("/operation")
-    async def create_operation(operation: OperationRequest):
-        """Inicia uma operação manual."""
-        if not client.running:
-            raise HTTPException(status_code=400, detail="Cliente não está em execução")
-        
-        # Cria ID para a operação manual
-        operation_id = client.next_operation_id
-        client.next_operation_id += 1
-        
-        # Cria task para executar a operação
-        asyncio.create_task(client._send_operation(operation_id))
-        
-        return {
-            "status": "initiated",
-            "operation_id": operation_id
-        }
-    
-    # Endpoint para iniciar o cliente
-    @app.post("/start")
-    async def start_client():
-        """Inicia o ciclo de operações do cliente."""
-        await client.start()
-        return {"status": "started"}
-    
-    # Endpoint para parar o cliente
-    @app.post("/stop")
-    async def stop_client():
-        """Para o ciclo de operações do cliente."""
-        await client.stop()
-        return {"status": "stopped"}
-    
-    # Endpoint para obter logs
-    @app.get("/logs")
-    async def get_logs(limit: int = Query(100, ge=1, le=1000)):
-        """Retorna logs do cliente."""
-        from common.logging import get_log_entries
-        return {"logs": get_log_entries("client", limit=limit)}
-    
-    return app
+    Args:
+        url: URL base do proposer
+    """
+    if client:
+        client.set_proposer(url)

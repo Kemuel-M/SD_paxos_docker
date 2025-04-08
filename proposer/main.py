@@ -1,150 +1,151 @@
-#!/usr/bin/env python3
-"""
-File: proposer/main.py
-Ponto de entrada da aplicação Proposer (Cluster Sync).
-Responsável por inicializar o servidor HTTP e carregar as configurações.
-Com suporte a múltiplos níveis de debug.
-"""
+import argparse
+import asyncio
+import logging
 import os
 import sys
-import logging
-import asyncio
-import signal
+import time
 import uvicorn
-from fastapi import FastAPI
+from typing import Dict, List
 
-# Adiciona diretório atual ao PYTHONPATH
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# Add parent directory to path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from api import create_api
-from proposer import Proposer
-from leader import LeaderElection
-from persistence import ProposerPersistence
-from common.logging import setup_logging
+from common.heartbeat import HeartbeatSystem
+from common.utils import get_debug_mode, setup_logging
+from proposer.api import app, initialize, add_acceptor, add_learner, add_store, add_proposer, start_leader_election_check
 
-# Carrega configurações
-NODE_ID = int(os.getenv("NODE_ID", 1))
-PORT = int(os.getenv("PORT", 8080))
-DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
-DEBUG_LEVEL = os.getenv("DEBUG_LEVEL", "basic").lower()  # Níveis: basic, advanced, trace
-ACCEPTORS = os.getenv("ACCEPTORS", "acceptor-1:8080,acceptor-2:8080,acceptor-3:8080,acceptor-4:8080,acceptor-5:8080").split(",")
-PROPOSERS = os.getenv("PROPOSERS", "proposer-1:8080,proposer-2:8080,proposer-3:8080,proposer-4:8080,proposer-5:8080").split(",")
-LEARNERS = os.getenv("LEARNERS", "learner-1:8080,learner-2:8080").split(",")
-STORES = os.getenv("STORES", "cluster-store-1:8080,cluster-store-2:8080,cluster-store-3:8080").split(",")
-LOG_DIR = os.getenv("LOG_DIR", "/data/logs")
+# Configuração do logger
+logger = logging.getLogger(__name__)
 
-logger = logging.getLogger("proposer")
-
-async def shutdown(app, persistence, leader_election, proposer):
-    """Função para desligar graciosamente o serviço"""
-    logger.important(f"Proposer {NODE_ID} está sendo desligado...")
+async def main():
+    """
+    Função principal do componente Proposer.
+    """
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Proposer - Paxos Consensus System')
+    parser.add_argument('--id', type=str, help='Unique ID for this proposer')
+    parser.add_argument('--port', type=int, default=8000, help='Port to run the server on')
+    parser.add_argument('--acceptors', type=str, help='Comma-separated list of acceptor URLs')
+    parser.add_argument('--learners', type=str, help='Comma-separated list of learner URLs')
+    parser.add_argument('--stores', type=str, help='Comma-separated list of store URLs')
+    parser.add_argument('--proposers', type=str, help='Comma-separated list of other proposer URLs')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
     
-    # Salva estado persistente
-    await persistence.save_state()
-    logger.info("Estado persistente salvo")
+    args = parser.parse_args()
     
-    # Encerra o detector de líder
-    await leader_election.stop()
-    logger.info("Detector de líder encerrado")
+    # Determine debug mode
+    debug = args.debug if args.debug is not None else get_debug_mode()
     
-    # Encerra o proposer
-    await proposer.stop()
-    logger.info("Processador de propostas encerrado")
+    # If ID is not provided, generate one from environment or random
+    proposer_id = args.id or os.environ.get('PROPOSER_ID') or f"proposer_{int(time.time())}"
     
-    logger.important(f"Proposer {NODE_ID} desligado com sucesso.")
-
-def main():
-    # Configura o logger com suporte a níveis de debug
-    setup_logging(f"proposer-{NODE_ID}", debug=DEBUG, debug_level=DEBUG_LEVEL, log_dir=LOG_DIR)
-    logger.important(f"Iniciando Proposer {NODE_ID}...")
+    # Setup logging
+    setup_logging(f"proposer_{proposer_id}", debug)
     
-    if DEBUG:
-        logger.info(f"Modo DEBUG ativado com nível: {DEBUG_LEVEL}")
-        logger.info(f"Configuração: PORT={PORT}, ACCEPTORS={len(ACCEPTORS)}, PROPOSERS={len(PROPOSERS)}, LEARNERS={len(LEARNERS)}, STORES={len(STORES)}")
+    logger.info(f"Starting proposer {proposer_id} on port {args.port}")
     
-    # Carrega estado persistente
-    persistence = ProposerPersistence(NODE_ID)
-    initial_state = persistence.load_state()
+    # Initialize the proposer
+    initialize(proposer_id, debug)
     
-    if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
-        logger.debug(f"Estado inicial carregado: {initial_state}")
+    # Parse acceptors list
+    if args.acceptors:
+        acceptors = args.acceptors.split(',')
+        for i, acceptor_url in enumerate(acceptors):
+            acceptor_id = f"acceptor_{i+1}"
+            add_acceptor(acceptor_id, acceptor_url.strip())
+    else:
+        # Default acceptors from environment variables
+        acceptors_env = os.environ.get('ACCEPTORS', '')
+        if acceptors_env:
+            acceptors = acceptors_env.split(',')
+            for i, acceptor_url in enumerate(acceptors):
+                acceptor_id = f"acceptor_{i+1}"
+                add_acceptor(acceptor_id, acceptor_url.strip())
+        else:
+            logger.warning("No acceptors specified. Using default localhost acceptors.")
+            for i in range(5):  # Default: 5 acceptors
+                port = 8100 + i
+                acceptor_id = f"acceptor_{i+1}"
+                add_acceptor(acceptor_id, f"http://localhost:{port}")
     
-    # Cria instância do proposer
-    proposer = Proposer(
-        node_id=NODE_ID,
-        acceptors=ACCEPTORS,
-        learners=LEARNERS,
-        stores=STORES,
-        proposal_counter=initial_state.get("proposal_counter", 0),
-        last_instance_id=initial_state.get("last_instance_id", 0)
-    )
+    # Parse learners list
+    if args.learners:
+        learners = args.learners.split(',')
+        for i, learner_url in enumerate(learners):
+            learner_id = f"learner_{i+1}"
+            add_learner(learner_id, learner_url.strip())
+    else:
+        # Default learners from environment variables
+        learners_env = os.environ.get('LEARNERS', '')
+        if learners_env:
+            learners = learners_env.split(',')
+            for i, learner_url in enumerate(learners):
+                learner_id = f"learner_{i+1}"
+                add_learner(learner_id, learner_url.strip())
+        else:
+            logger.warning("No learners specified. Using default localhost learners.")
+            for i in range(2):  # Default: 2 learners
+                port = 8200 + i
+                learner_id = f"learner_{i+1}"
+                add_learner(learner_id, f"http://localhost:{port}")
     
-    # Cria gerenciador de eleição de líder
-    leader_election = LeaderElection(
-        node_id=NODE_ID,
-        proposers=PROPOSERS,
-        proposer=proposer,
-        current_leader=initial_state.get("current_leader", None),
-        current_term=initial_state.get("current_term", 0)
-    )
+    # Parse stores list
+    if args.stores:
+        stores = args.stores.split(',')
+        for i, store_url in enumerate(stores):
+            store_id = f"store_{i+1}"
+            add_store(store_id, store_url.strip())
+    else:
+        # Default stores from environment variables
+        stores_env = os.environ.get('STORES', '')
+        if stores_env:
+            stores = stores_env.split(',')
+            for i, store_url in enumerate(stores):
+                store_id = f"store_{i+1}"
+                add_store(store_id, store_url.strip())
+        else:
+            logger.warning("No stores specified. Using default localhost stores.")
+            for i in range(3):  # Default: 3 stores
+                port = 8300 + i
+                store_id = f"store_{i+1}"
+                add_store(store_id, f"http://localhost:{port}")
     
-    # Cria API
-    app = create_api(proposer, leader_election)
+    # Parse proposers list
+    if args.proposers:
+        proposers = args.proposers.split(',')
+        for i, proposer_url in enumerate(proposers):
+            prop_id = f"proposer_{i+1}"
+            if prop_id != proposer_id:  # Don't add ourselves
+                add_proposer(prop_id, proposer_url.strip())
+    else:
+        # Default proposers from environment variables
+        proposers_env = os.environ.get('PROPOSERS', '')
+        if proposers_env:
+            proposers = proposers_env.split(',')
+            for i, proposer_url in enumerate(proposers):
+                prop_id = f"proposer_{i+1}"
+                # Check if this URL is for ourselves based on port
+                if f":{args.port}" not in proposer_url:
+                    add_proposer(prop_id, proposer_url.strip())
+        else:
+            logger.warning("No other proposers specified. Using default localhost proposers.")
+            for i in range(5):  # Default: 5 proposers
+                port = 8000 + i
+                if port != args.port:  # Don't add ourselves
+                    prop_id = f"proposer_{i+1}"
+                    add_proposer(prop_id, f"http://localhost:{port}")
     
-    # Configura callback para shutdown gracioso
-    @app.on_event("shutdown")
-    async def on_shutdown():
-        await shutdown(app, persistence, leader_election, proposer)
+    # Start the heartbeat system if needed
+    # heartbeat = HeartbeatSystem(proposer_id, debug)
+    # heartbeat.start()
     
-    # Inicia verificação periódica para persistência
-    @app.on_event("startup")
-    async def on_startup():
-        # Inicia o processador de propostas
-        await proposer.start()
-        logger.info("Processador de propostas iniciado")
-        
-        # Inicia a eleição de líder
-        asyncio.create_task(leader_election.start())
-        logger.info("Detector de líder iniciado")
-        
-        # Inicia o loop de persistência
-        asyncio.create_task(persistence_loop(persistence, proposer, leader_election))
-        logger.info("Loop de persistência iniciado")
+    # Start leader election checking
+    asyncio.create_task(start_leader_election_check())
     
-    async def persistence_loop(persistence, proposer, leader_election):
-        """Loop para salvar estado periodicamente"""
-        while True:
-            try:
-                await asyncio.sleep(10)  # Salva a cada 10 segundos
-                
-                # Prepara estado para salvamento
-                current_state = {
-                    "proposal_counter": proposer.proposal_counter,
-                    "last_instance_id": proposer.last_instance_id,
-                    "current_leader": leader_election.current_leader,
-                    "current_term": leader_election.current_term
-                }
-                
-                if DEBUG and DEBUG_LEVEL == "trace":
-                    logger.debug(f"Salvando estado: {current_state}")
-                
-                # Salva estado
-                await persistence.save_state(current_state)
-                
-            except Exception as e:
-                logger.error(f"Erro ao salvar estado persistente: {e}", exc_info=True)
-    
-    # Configura manipuladores de sinal para shutdown gracioso
-    loop = asyncio.get_event_loop()
-    signals = (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
-    for s in signals:
-        loop.add_signal_handler(
-            s, lambda s=s: asyncio.create_task(shutdown(app, persistence, leader_election, proposer))
-        )
-    
-    # Inicia o servidor
-    logger.important(f"Proposer {NODE_ID} iniciado e escutando na porta {PORT}")
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    # Run the FastAPI server
+    config = uvicorn.Config(app, host="0.0.0.0", port=args.port, log_level="info")
+    server = uvicorn.Server(config)
+    await server.serve()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -2,33 +2,19 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install dependencies
-COPY proposer/requirements.txt /app/
+# Instalar dependências
+COPY proposer/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy code
+# Copiar código fonte
 COPY proposer/ /app/proposer/
 COPY common/ /app/common/
 
-# Create persistent data directory
-RUN mkdir -p /data
-VOLUME /data
+# Criar diretório de logs
+RUN mkdir -p /app/logs
 
-# Environment configuration
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV PORT=8080
-ENV NODE_ID=1
-ENV DEBUG=false
+# Configuração da porta
+EXPOSE 8000
 
-# Adicionar diretório ao PYTHONPATH
-ENV PYTHONPATH="/app:${PYTHONPATH}"
-
-# Expose port
-EXPOSE 8080
-
-# Set working directory
-WORKDIR /app
-
-# Command to start the application
-CMD ["python", "proposer/main.py"]
+# Comandos de execução
+CMD ["python", "-m", "proposer.main"]

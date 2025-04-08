@@ -2,33 +2,19 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install dependencies
-COPY acceptor/requirements.txt /app/
+# Instalar dependências
+COPY acceptor/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy code
+# Copiar código fonte
 COPY acceptor/ /app/acceptor/
 COPY common/ /app/common/
 
-# Create persistent data and logs directories
-RUN mkdir -p /data /data/logs
-VOLUME /data
+# Criar diretório de logs
+RUN mkdir -p /app/logs
 
-# Environment configuration
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV PORT=8080
-ENV NODE_ID=1
-ENV DEBUG=false
-ENV DEBUG_LEVEL=basic
-ENV LOG_DIR=/data/logs
-ENV DATA_DIR=/data
+# Configuração da porta
+EXPOSE 8100
 
-# Expose port
-EXPOSE 8080
-
-# Set working directory
-WORKDIR /app/acceptor
-
-# Command to start the application
-CMD ["python", "main.py"]
+# Comandos de execução
+CMD ["python", "-m", "acceptor.main"]

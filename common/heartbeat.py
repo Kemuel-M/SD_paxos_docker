@@ -1,248 +1,210 @@
-"""
-Sistema de heartbeat para detecção de falhas entre componentes.
-"""
-import time
-import logging
 import asyncio
-from typing import Callable, Optional, Dict, Any
+import logging
+import time
+from typing import Callable, Dict, List, Optional
 
-logger = logging.getLogger("heartbeat")
+logger = logging.getLogger(__name__)
 
-class HeartbeatMonitor:
+class HeartbeatSystem:
     """
-    Monitor de heartbeat para detecção de falhas.
-    
-    Mantém controle de quando um componente foi visto pela última vez
-    e executa callback quando o tempo sem heartbeat exceder o limite.
+    Sistema de heartbeat para monitoramento de componentes.
+    Envia heartbeats a cada 5 segundos exatos para os componentes configurados.
     """
     
-    def __init__(self, target_description: str, failure_threshold: int = 6, 
-                on_failure: Optional[Callable] = None):
+    def __init__(self, component_id: str, debug: bool = False):
         """
-        Inicializa o monitor de heartbeat.
+        Inicializa o sistema de heartbeat.
         
         Args:
-            target_description: Descrição do alvo monitorado (para logs)
-            failure_threshold: Tempo em segundos após o qual o alvo é considerado falho
-            on_failure: Callback a ser executado quando uma falha for detectada
+            component_id: ID único do componente
+            debug: Flag para ativar o modo de depuração
         """
-        self.target_description = target_description
-        self.failure_threshold = failure_threshold
-        self.on_failure = on_failure
-        
-        self.last_heartbeat = 0
+        self.component_id = component_id
+        self.debug = debug
+        self.targets: Dict[str, dict] = {}
+        self.last_heartbeats: Dict[str, float] = {}
+        self.callbacks: Dict[str, List[Callable]] = {}
         self.running = False
-        self.monitor_task = None
-        self.failures_detected = 0
+        self.heartbeat_interval = 5.0  # Exatamente 5 segundos, conforme especificação
+        self._task: Optional[asyncio.Task] = None
         
-        logger.info(f"Monitor de heartbeat inicializado para {target_description}")
+        # Configura logs mais detalhados se debug estiver ativado
+        if debug:
+            log_level = logging.DEBUG
+        else:
+            log_level = logging.INFO
+            
+        logging.basicConfig(
+            level=log_level,
+            format=f'[{component_id}] %(asctime)s - %(levelname)s - %(message)s'
+        )
+        
+        logger.debug("Sistema de heartbeat inicializado")
     
-    def start(self):
-        """Inicia o monitor de heartbeat."""
-        if self.running:
-            return
-        
-        self.running = True
-        self.last_heartbeat = time.time()
-        self.failures_detected = 0
-        
-        # Inicia task de monitoramento
-        self.monitor_task = asyncio.create_task(self._monitor_loop())
-        
-        logger.info(f"Monitor de heartbeat iniciado para {self.target_description}")
-    
-    def stop(self):
-        """Para o monitor de heartbeat."""
-        if not self.running:
-            return
-        
-        self.running = False
-        
-        # Cancela task de monitoramento
-        if self.monitor_task and not self.monitor_task.done():
-            self.monitor_task.cancel()
-        
-        logger.info(f"Monitor de heartbeat parado para {self.target_description}")
-    
-    def set_target(self, target_description: str):
+    def add_target(self, target_id: str, url: str, timeout: float = 2.0) -> None:
         """
-        Atualiza a descrição do alvo monitorado.
+        Adiciona um alvo para envio de heartbeats.
         
         Args:
-            target_description: Nova descrição do alvo
-        """
-        self.target_description = target_description
-        logger.info(f"Alvo do monitor de heartbeat atualizado para {target_description}")
-    
-    def record_heartbeat(self):
-        """Registra um heartbeat recebido."""
-        self.last_heartbeat = time.time()
-        
-        # Se já tínhamos detectado falha, registra recuperação
-        if self.failures_detected > 0:
-            logger.info(f"{self.target_description} recuperado após {self.failures_detected} falhas detectadas")
-            self.failures_detected = 0
-    
-    async def _monitor_loop(self):
-        """Loop de monitoramento que verifica heartbeat periodicamente."""
-        logger.info(f"Iniciando loop de monitoramento para {self.target_description}")
-        
-        while self.running:
-            try:
-                # Verifica tempo desde último heartbeat
-                now = time.time()
-                elapsed = now - self.last_heartbeat
-                
-                # Verifica se excedeu limiar
-                if elapsed > self.failure_threshold:
-                    self.failures_detected += 1
-                    logger.warning(f"Falha de heartbeat detectada para {self.target_description}. "
-                                  f"Último heartbeat há {elapsed:.1f}s. "
-                                  f"Falhas consecutivas: {self.failures_detected}")
-                    
-                    # Executa callback de falha se definido
-                    if self.on_failure:
-                        try:
-                            await self.on_failure()
-                        except Exception as e:
-                            logger.error(f"Erro no callback de falha: {e}", exc_info=True)
-                
-                # Dorme por 1 segundo antes da próxima verificação
-                await asyncio.sleep(1)
-                
-            except asyncio.CancelledError:
-                logger.info(f"Loop de monitoramento cancelado para {self.target_description}")
-                break
-            except Exception as e:
-                logger.error(f"Erro no loop de monitoramento: {e}", exc_info=True)
-                await asyncio.sleep(1)  # Evita loop infinito de erros
-
-class HeartbeatSender:
-    """
-    Sender de heartbeat para indicar que um componente está ativo.
-    
-    Envia heartbeats periódicos para um ou mais alvos.
-    """
-    
-    def __init__(self, component_name: str, heartbeat_interval: float = 2.0):
-        """
-        Inicializa o sender de heartbeat.
-        
-        Args:
-            component_name: Nome do componente que envia heartbeats
-            heartbeat_interval: Intervalo entre heartbeats em segundos
-        """
-        self.component_name = component_name
-        self.heartbeat_interval = heartbeat_interval
-        
-        self.targets = {}  # endpoint -> { url, callback }
-        self.running = False
-        self.sender_task = None
-        
-        logger.info(f"Sender de heartbeat inicializado para {component_name} "
-                   f"com intervalo de {heartbeat_interval}s")
-    
-    def add_target(self, target_id: str, callback: Callable):
-        """
-        Adiciona um alvo para receber heartbeats.
-        
-        Args:
-            target_id: Identificador do alvo
-            callback: Função a ser chamada para enviar heartbeat
+            target_id: ID único do alvo
+            url: URL completo do endpoint de heartbeat do alvo
+            timeout: Tempo máximo de espera pela resposta
         """
         self.targets[target_id] = {
-            "callback": callback,
-            "last_success": 0,
-            "failures": 0
+            "url": url,
+            "timeout": timeout,
+            "failures": 0,
+            "status": "unknown"
         }
-        logger.info(f"Adicionado alvo de heartbeat: {target_id}")
+        self.last_heartbeats[target_id] = 0
+        self.callbacks[target_id] = []
+        logger.debug(f"Alvo adicionado: {target_id} -> {url}")
     
-    def remove_target(self, target_id: str):
+    def remove_target(self, target_id: str) -> None:
         """
-        Remove um alvo.
+        Remove um alvo do sistema de heartbeat.
         
         Args:
-            target_id: Identificador do alvo
+            target_id: ID do alvo a ser removido
         """
         if target_id in self.targets:
             del self.targets[target_id]
-            logger.info(f"Removido alvo de heartbeat: {target_id}")
+            del self.last_heartbeats[target_id]
+            del self.callbacks[target_id]
+            logger.debug(f"Alvo removido: {target_id}")
     
-    def start(self):
-        """Inicia o envio de heartbeats."""
-        if self.running:
-            return
+    def register_failure_callback(self, target_id: str, callback: Callable) -> None:
+        """
+        Registra uma função de callback para ser chamada quando um alvo falhar.
         
-        self.running = True
-        
-        # Inicia task de envio
-        self.sender_task = asyncio.create_task(self._sender_loop())
-        
-        logger.info(f"Sender de heartbeat iniciado para {self.component_name}")
+        Args:
+            target_id: ID do alvo
+            callback: Função a ser chamada em caso de falha
+        """
+        if target_id in self.callbacks:
+            self.callbacks[target_id].append(callback)
+            logger.debug(f"Callback registrado para {target_id}")
     
-    def stop(self):
-        """Para o envio de heartbeats."""
-        if not self.running:
-            return
-        
-        self.running = False
-        
-        # Cancela task de envio
-        if self.sender_task and not self.sender_task.done():
-            self.sender_task.cancel()
-        
-        logger.info(f"Sender de heartbeat parado para {self.component_name}")
-    
-    async def _sender_loop(self):
-        """Loop de envio que envia heartbeats periodicamente."""
-        logger.info(f"Iniciando loop de envio de heartbeat para {self.component_name}")
-        
-        while self.running:
-            try:
-                # Envia heartbeat para todos os alvos
-                send_tasks = []
-                
-                for target_id, target in self.targets.items():
-                    send_tasks.append(self._send_heartbeat(target_id, target))
-                
-                # Executa envios em paralelo
-                await asyncio.gather(*send_tasks, return_exceptions=True)
-                
-                # Dorme até o próximo intervalo
-                await asyncio.sleep(self.heartbeat_interval)
-                
-            except asyncio.CancelledError:
-                logger.info(f"Loop de envio de heartbeat cancelado para {self.component_name}")
-                break
-            except Exception as e:
-                logger.error(f"Erro no loop de envio de heartbeat: {e}", exc_info=True)
-                await asyncio.sleep(1)  # Evita loop infinito de erros
-    
-    async def _send_heartbeat(self, target_id: str, target: Dict[str, Any]):
+    async def _send_heartbeat(self, target_id: str, target_info: dict) -> bool:
         """
         Envia um heartbeat para um alvo específico.
         
         Args:
-            target_id: Identificador do alvo
-            target: Informações do alvo
+            target_id: ID do alvo
+            target_info: Informações do alvo
+            
+        Returns:
+            bool: True se o heartbeat foi bem-sucedido, False caso contrário
         """
+        import aiohttp
+        
+        url = target_info["url"]
+        timeout = target_info["timeout"]
+        
         try:
-            # Chama o callback para enviar heartbeat
-            await target["callback"]()
-            
-            # Atualiza status
-            target["last_success"] = time.time()
-            
-            # Registra recuperação se necessário
-            if target["failures"] > 0:
-                logger.info(f"Heartbeat para {target_id} recuperado após {target['failures']} falhas")
-                target["failures"] = 0
-            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=timeout) as response:
+                    if response.status == 200:
+                        if self.debug:
+                            logger.debug(f"Heartbeat bem-sucedido para {target_id}")
+                        return True
+                    else:
+                        logger.warning(f"Heartbeat falhou para {target_id}: status {response.status}")
+                        return False
         except Exception as e:
-            # Incrementa contador de falhas
-            target["failures"] += 1
+            logger.warning(f"Heartbeat falhou para {target_id}: {str(e)}")
+            return False
+    
+    async def _heartbeat_loop(self) -> None:
+        """
+        Loop principal que envia heartbeats para todos os alvos a cada 5 segundos.
+        """
+        logger.info("Iniciando loop de heartbeat")
+        
+        while self.running:
+            start_time = time.time()
             
-            # Loga apenas na primeira falha e a cada 5 falhas para evitar spam
-            if target["failures"] == 1 or target["failures"] % 5 == 0:
-                logger.warning(f"Falha ao enviar heartbeat para {target_id}: {e}. "
-                              f"Falhas consecutivas: {target['failures']}")
+            # Envia heartbeats para todos os alvos
+            for target_id, target_info in self.targets.items():
+                result = await self._send_heartbeat(target_id, target_info)
+                
+                if result:
+                    # Heartbeat bem-sucedido
+                    self.last_heartbeats[target_id] = start_time
+                    if target_info["status"] == "down":
+                        logger.info(f"Alvo {target_id} está online novamente")
+                    target_info["status"] = "up"
+                    target_info["failures"] = 0
+                else:
+                    # Heartbeat falhou
+                    target_info["failures"] += 1
+                    
+                    if target_info["failures"] >= 3 and target_info["status"] != "down":
+                        # Consideramos um componente como caído após 3 falhas consecutivas
+                        logger.warning(f"Alvo {target_id} está fora do ar após {target_info['failures']} falhas")
+                        target_info["status"] = "down"
+                        
+                        # Chama os callbacks registrados
+                        for callback in self.callbacks[target_id]:
+                            try:
+                                callback(target_id)
+                            except Exception as e:
+                                logger.error(f"Erro no callback para {target_id}: {str(e)}")
+            
+            # Calcula o tempo para esperar até o próximo ciclo
+            elapsed = time.time() - start_time
+            wait_time = max(0, self.heartbeat_interval - elapsed)
+            
+            if self.debug:
+                logger.debug(f"Ciclo de heartbeat completado em {elapsed:.3f}s, aguardando {wait_time:.3f}s")
+            
+            # Espera exatamente o tempo necessário para manter o intervalo de 5 segundos
+            await asyncio.sleep(wait_time)
+    
+    def start(self) -> None:
+        """
+        Inicia o sistema de heartbeat.
+        """
+        if not self.running:
+            self.running = True
+            self._task = asyncio.create_task(self._heartbeat_loop())
+            logger.info("Sistema de heartbeat iniciado")
+    
+    def stop(self) -> None:
+        """
+        Para o sistema de heartbeat.
+        """
+        if self.running:
+            self.running = False
+            if self._task:
+                self._task.cancel()
+            logger.info("Sistema de heartbeat parado")
+    
+    def get_status(self, target_id: str = None) -> dict:
+        """
+        Obtém o status de um alvo específico ou de todos os alvos.
+        
+        Args:
+            target_id: ID do alvo (opcional)
+            
+        Returns:
+            dict: Status do alvo ou de todos os alvos
+        """
+        if target_id:
+            if target_id in self.targets:
+                return {
+                    "status": self.targets[target_id]["status"],
+                    "last_heartbeat": self.last_heartbeats[target_id],
+                    "failures": self.targets[target_id]["failures"]
+                }
+            return {"error": f"Alvo {target_id} não encontrado"}
+        
+        # Retorna o status de todos os alvos
+        result = {}
+        for tid, info in self.targets.items():
+            result[tid] = {
+                "status": info["status"],
+                "last_heartbeat": self.last_heartbeats[tid],
+                "failures": info["failures"]
+            }
+        return result

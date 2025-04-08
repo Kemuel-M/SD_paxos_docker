@@ -2,34 +2,19 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install dependencies
-COPY client/requirements.txt /app/
+# Instalar dependências
+COPY client/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy code
-COPY client/ /app/
+# Copiar código fonte
+COPY client/ /app/client/
 COPY common/ /app/common/
 
-# Create persistent data and logs directories
-RUN mkdir -p /data /data/logs
-VOLUME /data
+# Criar diretório de logs
+RUN mkdir -p /app/logs
 
-# Environment configuration
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV CLIENT_ID=client-1
-ENV NODE_ID=1
-ENV API_PORT=8080
-ENV WEB_PORT=8081
-ENV DEBUG=false
-ENV DEBUG_LEVEL=basic
-ENV PROPOSER=proposer-1:8080
-ENV LOG_DIR=/data/logs
-ENV NUM_OPERATIONS=0
-ENV AUTO_START=false
+# Configuração das portas
+EXPOSE 8400 8500
 
-# Expose ports for API and web server
-EXPOSE 8080 8081
-
-# Command to start the application
-CMD ["python", "main.py"]
+# Comandos de execução
+CMD ["python", "-m", "client.main"]

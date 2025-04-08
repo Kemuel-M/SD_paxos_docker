@@ -1,121 +1,109 @@
 <!DOCTYPE html>
-<html lang="pt-br">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cliente Paxos - Dashboard</title>
-    <link rel="stylesheet" href="{{ url_for('static', path='/css/styles.css') }}">
-    <meta http-equiv="refresh" content="5">
+    <title>Paxos Client - {{ client.id }}</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>Cliente Paxos - {{ client_id }}</h1>
-            <nav>
-                <ul>
-                    <li><a href="/" class="active">Dashboard</a></li>
-                    <li><a href="/resources">Recursos</a></li>
-                    <li><a href="/history">Histórico</a></li>
-                    <li><a href="/logs">Logs</a></li>
-                    <li><a href="/system-logs">Logs do Sistema</a></li>
-                </ul>
-            </nav>
+            <h1>Paxos Consensus System</h1>
+            <h2>Client: {{ client.id }}</h2>
         </header>
 
-        <main>
-            <section class="status-panel">
-                <h2>Status do Cliente</h2>
-                <div class="status-cards">
-                    <div class="card">
-                        <h3>Operações</h3>
-                        <div class="stat">{{ status.completed }} / {{ status.total_operations }}</div>
-                        <div class="progress">
-                            <div class="progress-bar" data-progress="{{ progress_percentage }}"></div>
-                        </div>
-                        <div class="stat-details">
-                            <span>Completas: {{ status.completed }}</span>
-                            <span>Falhas: {{ status.failed }}</span>
-                            <span>Em Progresso: {{ status.in_progress }}</span>
-                        </div>
-                    </div>
-                    <div class="card">
-                        <h3>Performance</h3>
-                        <div class="stat">{{ "%.2f"|format(status.avg_latency) }}s</div>
-                        <div class="stat-label">Latência Média</div>
-                        <div class="stat-details">
-                            <span>Tempo de Execução: {{ "%.2f"|format(status.runtime) }}s</span>
-                            <span>Operações/s: {{ "%.2f"|format(status.completed / status.runtime) if status.runtime > 0 else 0 }}</span>
-                        </div>
-                    </div>
-                    <div class="card">
-                        <h3>Estado</h3>
-                        <div class="stat status-{{ 'active' if status.running else 'inactive' }}">
-                            {{ "Ativo" if status.running else "Inativo" }}
-                        </div>
-                        <div class="stat-details">
-                            <span>Proposer: {{ status.proposer_url }}</span>
-                            <button id="toggle-client" class="button {{ 'stop' if status.running else 'start' }}">
-                                {{ "Parar" if status.running else "Iniciar" }}
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            </section>
+        <div class="status-bar">
+            <div class="status-item">
+                <span class="status-label">Status:</span>
+                <span id="client-status" class="status-value {% if client.running %}status-running{% else %}status-idle{% endif %}">
+                    {% if client.running %}Running{% else %}Idle{% endif %}
+                </span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Total Requests:</span>
+                <span id="total-requests" class="status-value">{{ client.total_requests }}</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Successful:</span>
+                <span id="successful-requests" class="status-value success">{{ client.successful_requests }}</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Failed:</span>
+                <span id="failed-requests" class="status-value error">{{ client.failed_requests }}</span>
+            </div>
+        </div>
 
-            <section class="operations-panel">
-                <h2>Operações Recentes</h2>
-                <div class="table-container">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>ID</th>
-                                <th>Instance ID</th>
-                                <th>Inicio</th>
-                                <th>Duração</th>
-                                <th>Status</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {% for op in recent_operations %}
-                            <tr>
-                                <td>{{ op.id }}</td>
-                                <td>{{ op.instance_id if 'instance_id' in op else '-' }}</td>
-                                <td>{{ op.start_time|int }}</td>
-                                <td>{{ "%.2f"|format(op.latency) if 'latency' in op else '-' }}s</td>
-                                <td class="status-{{ op.status }}">{{ op.status }}</td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
+        <div class="main-content">
+            <div class="action-panel">
+                <h3>Control Panel</h3>
+                <div class="control-actions">
+                    <button id="start-requests" class="btn btn-primary" {% if client.running %}disabled{% endif %}>
+                        Start Random Requests
+                    </button>
+                    <button id="stop-requests" class="btn btn-danger" {% if not client.running %}disabled{% endif %}>
+                        Stop Requests
+                    </button>
+                    <a href="/dashboard" class="btn btn-secondary">View Dashboard</a>
                 </div>
-                <div class="view-more">
-                    <a href="/history" class="button">Ver Histórico Completo</a>
-                </div>
-            </section>
 
-            <section class="manual-operation">
-                <h2>Operação Manual</h2>
-                <form id="manual-operation-form">
+                <div class="control-settings">
+                    <h4>Request Settings</h4>
                     <div class="form-group">
-                        <label for="operation-data">Dados da Operação:</label>
-                        <textarea id="operation-data" name="data" rows="4" placeholder="Digite os dados para enviar ao recurso..."></textarea>
+                        <label for="num-requests">Number of Requests:</label>
+                        <input type="number" id="num-requests" min="1" max="100" value="{{ client.min_requests }}" 
+                            placeholder="Random between {{ client.min_requests }} and {{ client.max_requests }}">
                     </div>
-                    <div class="form-actions">
-                        <button type="submit" class="button primary">Enviar Operação</button>
+                    <div class="form-group">
+                        <label for="min-wait">Min Wait Time (seconds):</label>
+                        <input type="number" id="min-wait" min="0.1" max="10" step="0.1" value="{{ client.min_wait }}">
                     </div>
-                </form>
-                <div id="operation-result" class="hidden">
-                    <h3>Resultado da Operação</h3>
-                    <div id="operation-result-content"></div>
+                    <div class="form-group">
+                        <label for="max-wait">Max Wait Time (seconds):</label>
+                        <input type="number" id="max-wait" min="0.1" max="10" step="0.1" value="{{ client.max_wait }}">
+                    </div>
+                    <button id="update-settings" class="btn btn-secondary">Update Settings</button>
                 </div>
-            </section>
-        </main>
+            </div>
+
+            <div class="manual-request-panel">
+                <h3>Manual Request</h3>
+                <div class="form-group">
+                    <label for="resource-data">Resource Data (JSON):</label>
+                    <textarea id="resource-data" rows="8" placeholder="Enter JSON data for the resource">
+{
+    "name": "Manual Resource",
+    "value": 42,
+    "created_by": "{{ client.id }}",
+    "timestamp": null,
+    "data": {
+        "field1": "value1",
+        "field2": 3.14,
+        "field3": true
+    }
+}
+                    </textarea>
+                </div>
+                <button id="send-request" class="btn btn-primary">Send Request</button>
+                <div id="request-result" class="result-panel hidden">
+                    <h4>Request Result:</h4>
+                    <pre id="result-content"></pre>
+                </div>
+            </div>
+        </div>
+
+        <div class="recent-activity">
+            <h3>Recent Activity</h3>
+            <div id="activity-log">
+                <div class="activity-empty">No recent activity. Start sending requests to see activity here.</div>
+            </div>
+        </div>
 
         <footer>
-            <p>Cliente Paxos - Sistema de Consenso Distribuído</p>
+            <p>Paxos Consensus System - Connected to Proposer: <span>{{ client.proposer_url }}</span></p>
         </footer>
     </div>
 
-    <script src="{{ url_for('static', path='/js/main.js') }}"></script>
+    <script src="/static/js/client.js"></script>
 </body>
 </html>
