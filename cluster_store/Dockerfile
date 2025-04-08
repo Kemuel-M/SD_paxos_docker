@@ -24,6 +24,9 @@ ENV DEBUG_LEVEL=basic
 ENV DATA_DIR=/data/resources
 ENV LOG_DIR=/data/logs
 
+# Adicionar diretório ao PYTHONPATH
+ENV PYTHONPATH="/app:${PYTHONPATH}"
+
 # Expose port
 EXPOSE 8080
 

@@ -18,7 +18,7 @@ from common.logging import setup_logging
 from common.heartbeat import HeartbeatMonitor, HeartbeatSender
 from common.communication import HttpClient
 
-from persistence import ResourceStorage
+from cluster_store.persistence import ResourceStorage
 from store import ResourceManager
 from synchronization import SynchronizationManager
 from api import create_api

@@ -21,11 +21,14 @@ ENV PORT=8080
 ENV NODE_ID=1
 ENV DEBUG=false
 
+# Adicionar diretório ao PYTHONPATH
+ENV PYTHONPATH="/app:${PYTHONPATH}"
+
 # Expose port
 EXPOSE 8080
 
 # Set working directory
-WORKDIR /app/proposer
+WORKDIR /app
 
 # Command to start the application
-CMD ["python", "main.py"]
+CMD ["python", "proposer/main.py"]
