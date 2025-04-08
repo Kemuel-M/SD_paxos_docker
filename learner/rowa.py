@@ -1,318 +1,192 @@
-import asyncio
-import logging
+"""
+File: learner/rowa.py
+Implementation of the Read-One-Write-All (ROWA) protocol for the Learner component.
+Responsible for coordinating read and write operations to the Cluster Store nodes.
+"""
+import os
 import time
-from typing import Dict, List, Optional, Set
+import logging
+import asyncio
+import random
+from typing import Dict, Any, List, Optional, Tuple
+from collections import defaultdict
 
-from common.utils import http_request
+from common.communication import HttpClient
+from common.utils import current_timestamp
 
-logger = logging.getLogger(__name__)
+# Enhanced debug configuration
+DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
+DEBUG_LEVEL = os.getenv("DEBUG_LEVEL", "basic").lower()  # Levels: basic, advanced, trace
 
-class ROWAManager:
+logger = logging.getLogger("learner")
+
+class RowaManager:
     """
-    Implementação do protocolo Read One, Write All (ROWA).
+    Implements the Read-One-Write-All (ROWA) protocol for distributed data management.
     
-    No protocolo ROWA:
-    - Leituras são realizadas em apenas um servidor (Nr = 1)
-    - Escritas precisam ser confirmadas por todos os servidores (Nw = N)
+    In ROWA:
+    - Reads are performed on any single node (Nr=1)
+    - Writes must be performed on all nodes (Nw=N)
     
-    Este protocolo favorece leituras rápidas, mas torna as escritas
-    vulneráveis a falhas de qualquer servidor.
+    This protocol provides strong consistency but sacrifices availability 
+    for write operations when any node is unavailable.
     """
     
-    def __init__(self, learner_id: str, debug: bool = False):
+    def __init__(self, node_id: int, stores: List[str], two_phase_manager):
         """
-        Inicializa o gerenciador ROWA.
+        Initialize the RowaManager.
         
         Args:
-            learner_id: ID do learner
-            debug: Flag para ativar modo de depuração
+            node_id: ID of the learner
+            stores: List of Cluster Store addresses
+            two_phase_manager: TwoPhaseCommitManager for coordinating writes
         """
-        self.learner_id = learner_id
-        self.debug = debug
-        self.enabled = True  # Por padrão, ROWA está ativado
+        self.node_id = node_id
+        self.stores = stores
+        self.two_phase_manager = two_phase_manager
         
-        # Controle de aceitação
-        self.acceptor_count = 0
+        # HTTP client for communication
+        self.http_client = HttpClient()
         
-        # Estado das propostas
-        self.proposals: Dict[str, Dict] = {}  # {proposal_id: {acceptors: {}, tid: int, ...}}
+        # Current round-robin index for read operations
+        self.current_read_index = 0
         
-        # Lista de stores
-        self.stores: Dict[str, str] = {}  # {store_id: url}
+        # Statistics
+        self.reads_processed = 0
+        self.writes_processed = 0
+        self.write_successes = 0
+        self.write_failures = 0
         
-        # Lista de clientes
-        self.clients: Dict[str, str] = {}  # {client_id: url}
+        # Lock for thread safety
+        self.lock = asyncio.Lock()
         
-        # Locks
-        self.proposals_lock = asyncio.Lock()
+        logger.info(f"RowaManager initialized with {len(stores)} store nodes")
         
-        logger.debug(f"ROWA Manager inicializado para learner {learner_id} (debug={debug})")
+        if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
+            logger.debug(f"Store nodes: {self.stores}")
     
-    def is_enabled(self) -> bool:
+    async def read_resource(self, resource_id: str) -> Optional[Dict[str, Any]]:
         """
-        Verifica se o protocolo ROWA está ativado.
+        Read a resource from any available store node (Nr=1).
+        Uses round-robin selection for load balancing.
         
+        Args:
+            resource_id: ID of the resource to read
+            
         Returns:
-            bool: True se o ROWA está ativado, False caso contrário
+            Optional[Dict[str, Any]]: Resource data or None if not found or error
         """
-        return self.enabled
+        if not self.stores:
+            logger.error("No store nodes available for read operation")
+            return None
+        
+        async with self.lock:
+            self.reads_processed += 1
+        
+        # Try all stores in round-robin order until one succeeds
+        for _ in range(len(self.stores)):
+            # Get next store in round-robin
+            async with self.lock:
+                store = self.stores[self.current_read_index]
+                self.current_read_index = (self.current_read_index + 1) % len(self.stores)
+            
+            try:
+                logger.info(f"Reading resource {resource_id} from store {store}")
+                
+                # Send GET request to store
+                url = f"http://{store}/resource/{resource_id}"
+                result = await self.http_client.get(url, timeout=0.5)
+                
+                if DEBUG:
+                    logger.debug(f"Read result from {store}: {result}")
+                
+                # Return the resource if successful
+                return result
+                
+            except Exception as e:
+                logger.warning(f"Failed to read from store {store}: {e}")
+                continue
+        
+        # If all stores failed
+        logger.error(f"Failed to read resource {resource_id} from any store")
+        return None
     
-    def set_enabled(self, enabled: bool) -> None:
+    async def write_resource(self, resource_id: str, data: str, client_id: str, 
+                           instance_id: int, client_timestamp: int) -> Tuple[bool, Optional[Dict[str, Any]]]:
         """
-        Ativa ou desativa o protocolo ROWA.
+        Write a resource to all store nodes (Nw=N) using Two-Phase Commit.
         
         Args:
-            enabled: Flag para ativar/desativar o ROWA
-        """
-        self.enabled = enabled
-        logger.info(f"Protocolo ROWA {'ativado' if enabled else 'desativado'}")
-    
-    def set_acceptor_count(self, count: int) -> None:
-        """
-        Define o número total de acceptors.
-        
-        Args:
-            count: Número total de acceptors
-        """
-        self.acceptor_count = count
-        logger.debug(f"Número de acceptors definido: {count}")
-    
-    def add_store(self, store_id: str, url: str) -> None:
-        """
-        Adiciona um store à lista de stores conhecidos.
-        
-        Args:
-            store_id: ID do store
-            url: URL base do store
-        """
-        self.stores[store_id] = url
-        logger.debug(f"Store adicionado: {store_id} -> {url}")
-    
-    def add_client(self, client_id: str, url: str) -> None:
-        """
-        Adiciona um cliente à lista de clientes conhecidos.
-        
-        Args:
-            client_id: ID do cliente
-            url: URL base do cliente
-        """
-        self.clients[client_id] = url
-        logger.debug(f"Cliente adicionado: {client_id} -> {url}")
-    
-    async def process_learn(self, proposal_id: str, acceptor_id: str, proposer_id: str, 
-                          tid: int, client_id: str, resource_data: Dict, timestamp: int) -> Dict:
-        """
-        Processa um aprendizado de proposta usando o protocolo ROWA.
-        
-        Args:
-            proposal_id: ID da proposta
-            acceptor_id: ID do acceptor que aceitou a proposta
-            proposer_id: ID do proposer que propôs o valor
-            tid: TID da proposta
-            client_id: ID do cliente
-            resource_data: Dados do recurso
-            timestamp: Timestamp da proposta
-        
+            resource_id: ID of the resource to write
+            data: Data to write
+            client_id: ID of the client that initiated the request
+            instance_id: ID of the Paxos instance
+            client_timestamp: Timestamp of the client request
+            
         Returns:
-            Dict: Resultado do processamento
+            Tuple[bool, Optional[Dict[str, Any]]]: (success, result_data)
         """
-        async with self.proposals_lock:
-            # Se já conhecemos esta proposta, atualizamos com o novo acceptor
-            if proposal_id in self.proposals:
-                proposal = self.proposals[proposal_id]
-                
-                # Adiciona o acceptor à lista de acceptors que aceitaram esta proposta
-                proposal["acceptors"][acceptor_id] = {
-                    "tid": tid,
-                    "timestamp": time.time()
-                }
-                
-                # Se o TID for diferente do que já conhecemos, algo está errado
-                if tid != proposal["tid"]:
-                    logger.warning(f"TID diferente para proposta {proposal_id}: {tid} != {proposal['tid']}")
-                
-                # Verifica se todos os acceptors aceitaram a proposta (ROWA)
-                if len(proposal["acceptors"]) == self.acceptor_count and not proposal.get("committed", False):
-                    # Todos os acceptors aceitaram! Podemos commitar a proposta
-                    logger.info(f"Todos os acceptors ({len(proposal['acceptors'])}/{self.acceptor_count}) aceitaram a proposta {proposal_id} (ROWA)")
-                    
-                    # Marca a proposta como commitada
-                    proposal["committed"] = True
-                    proposal["committed_at"] = time.time()
-                    
-                    # Notifica o cliente
-                    await self._notify_client(client_id, proposal_id, tid, resource_data, "COMMITTED")
-                    
-                    # Notifica os stores
-                    await self._update_stores(proposal_id, tid, resource_data)
-                else:
-                    logger.debug(f"Aguardando mais acceptors para proposta {proposal_id}: {len(proposal['acceptors'])}/{self.acceptor_count} (ROWA)")
-            else:
-                # Primeira vez que vemos esta proposta
-                self.proposals[proposal_id] = {
-                    "proposal_id": proposal_id,
-                    "tid": tid,
-                    "proposer_id": proposer_id,
-                    "client_id": client_id,
-                    "resource_data": resource_data,
-                    "timestamp": timestamp,
-                    "first_learned_at": time.time(),
-                    "acceptors": {
-                        acceptor_id: {
-                            "tid": tid,
-                            "timestamp": time.time()
-                        }
-                    },
-                    "committed": False
-                }
-                
-                # Se só existe um acceptor, podemos commitar imediatamente
-                if self.acceptor_count == 1:
-                    logger.info(f"Único acceptor aceitou a proposta {proposal_id} (ROWA)")
-                    
-                    # Marca a proposta como commitada
-                    self.proposals[proposal_id]["committed"] = True
-                    self.proposals[proposal_id]["committed_at"] = time.time()
-                    
-                    # Notifica o cliente
-                    await self._notify_client(client_id, proposal_id, tid, resource_data, "COMMITTED")
-                    
-                    # Notifica os stores
-                    await self._update_stores(proposal_id, tid, resource_data)
-                else:
-                    logger.debug(f"Aguardando mais acceptors para proposta {proposal_id}: 1/{self.acceptor_count} (ROWA)")
+        if not self.stores:
+            logger.error("No store nodes available for write operation")
+            return False, None
         
-        return {
-            "success": True,
-            "proposal_id": proposal_id,
-            "learner_id": self.learner_id
-        }
-    
-    async def _notify_client(self, client_id: str, proposal_id: str, tid: int, 
-                           resource_data: Dict, status: str) -> None:
-        """
-        Notifica o cliente sobre o resultado de uma proposta.
+        async with self.lock:
+            self.writes_processed += 1
         
-        Args:
-            client_id: ID do cliente
-            proposal_id: ID da proposta
-            tid: TID da proposta
-            resource_data: Dados do recurso
-            status: Status da proposta (COMMITTED ou NOT_COMMITTED)
-        """
-        # Verifica se conhecemos o cliente
-        if client_id not in self.clients:
-            logger.warning(f"Cliente {client_id} não encontrado. Não é possível notificar sobre proposta {proposal_id}")
-            return
+        logger.info(f"Writing resource {resource_id} from instance {instance_id} (client: {client_id})")
         
-        client_url = self.clients[client_id]
-        notification_url = f"{client_url}/notify"
-        
-        # Dados da notificação
-        notification_data = {
-            "proposal_id": proposal_id,
-            "tid": tid,
-            "status": status,
-            "resource_data": resource_data,
-            "learner_id": self.learner_id,
-            "timestamp": time.time(),
-            "protocol": "ROWA"
+        # Prepare the value to write
+        value = {
+            "data": data,
+            "instanceId": instance_id,
+            "clientId": client_id,
+            "timestamp": client_timestamp
         }
         
-        try:
-            # Envia a notificação para o cliente
-            response = await http_request("POST", notification_url, data=notification_data)
-            
-            if response.get("success", False):
-                logger.debug(f"Cliente {client_id} notificado com sucesso sobre proposta {proposal_id} (ROWA)")
+        # Use Two-Phase Commit for the write operation
+        success, result = await self.two_phase_manager.execute_transaction(
+            resource_id, value, max_retries=3)
+        
+        # Update statistics
+        async with self.lock:
+            if success:
+                self.write_successes += 1
             else:
-                logger.warning(f"Falha ao notificar cliente {client_id} sobre proposta {proposal_id} (ROWA): {response.get('error', 'erro desconhecido')}")
-        except Exception as e:
-            logger.error(f"Erro ao notificar cliente {client_id} sobre proposta {proposal_id} (ROWA): {str(e)}")
-    
-    async def _update_stores(self, proposal_id: str, tid: int, resource_data: Dict) -> None:
-        """
-        Atualiza os stores com os dados da proposta commitada.
-        Com ROWA, todas as escritas devem ser aplicadas a todos os stores.
+                self.write_failures += 1
         
-        Args:
-            proposal_id: ID da proposta
-            tid: TID da proposta
-            resource_data: Dados do recurso
-        """
-        # Preparar as tarefas de atualização para todos os stores
-        update_tasks = []
-        
-        # No ROWA, precisamos atualizar TODOS os stores
-        for store_id, url in self.stores.items():
-            update_url = f"{url}/commit"
-            
-            update_data = {
-                "proposal_id": proposal_id,
-                "tid": tid,
-                "resource_data": resource_data,
-                "learner_id": self.learner_id,
-                "timestamp": time.time(),
-                "protocol": "ROWA"
-            }
-            
-            task = asyncio.create_task(
-                self._update_store(store_id, update_url, update_data)
-            )
-            update_tasks.append(task)
-        
-        # Aguarda todas as atualizações serem concluídas
-        results = await asyncio.gather(*update_tasks, return_exceptions=True)
-        
-        # Verifica os resultados
-        success_count = 0
-        error_count = 0
-        failed_stores = []
-        
-        for i, result in enumerate(results):
-            store_id = list(self.stores.keys())[i]  # Obtém o store_id correspondente
-            
-            if isinstance(result, Exception):
-                error_count += 1
-                failed_stores.append(store_id)
-                logger.error(f"Erro ao atualizar store {store_id}: {str(result)}")
-            elif result.get("success", False):
-                success_count += 1
-            else:
-                error_count += 1
-                failed_stores.append(store_id)
-                logger.error(f"Falha ao atualizar store {store_id}: {result.get('error', 'erro desconhecido')}")
-        
-        # No ROWA, todas as escritas devem ser bem-sucedidas
-        if error_count > 0:
-            logger.error(f"Falha na atualização de {error_count} stores: {failed_stores}")
-            
-            # TODO: Implementar estratégia de recuperação
-            # Por enquanto, apenas logamos o erro
+        if success:
+            logger.info(f"Successfully wrote resource {resource_id} (instance {instance_id})")
+            if DEBUG:
+                logger.debug(f"Write result: {result}")
         else:
-            logger.info(f"Todos os {len(self.stores)} stores atualizados com sucesso (ROWA)")
-    
-    async def _update_store(self, store_id: str, url: str, data: Dict) -> Dict:
-        """
-        Atualiza um store específico com os dados da proposta.
+            logger.error(f"Failed to write resource {resource_id} (instance {instance_id})")
         
-        Args:
-            store_id: ID do store
-            url: URL do endpoint commit do store
-            data: Dados da atualização
+        return success, result
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """
+        Get statistics about the RowaManager.
         
         Returns:
-            Dict: Resposta do store
+            Dict[str, Any]: Statistics
         """
-        try:
-            response = await http_request("POST", url, data=data)
-            
-            if response.get("success", False):
-                logger.debug(f"Store {store_id} atualizado com sucesso para proposta {data['proposal_id']} (ROWA)")
-            else:
-                logger.warning(f"Falha ao atualizar store {store_id} para proposta {data['proposal_id']} (ROWA): {response.get('error', 'erro desconhecido')}")
-            
-            return response
-        except Exception as e:
-            logger.error(f"Erro ao atualizar store {store_id} para proposta {data['proposal_id']} (ROWA): {str(e)}")
-            raise
+        return {
+            "reads_processed": self.reads_processed,
+            "writes_processed": self.writes_processed,
+            "write_successes": self.write_successes,
+            "write_failures": self.write_failures,
+            "success_rate": (self.write_successes / self.writes_processed) if self.writes_processed > 0 else 0
+        }
+    
+    async def simulate_resource_access(self) -> float:
+        """
+        Simulate access to a resource by waiting a random amount of time.
+        Used in Part 1 when Cluster Store is not available.
+        
+        Returns:
+            float: Time spent in seconds
+        """
+        # Wait between 0.2 and 1.0 seconds with millisecond precision
+        delay = random.uniform(0.2, 1.0)
+        await asyncio.sleep(delay)
+        return delay

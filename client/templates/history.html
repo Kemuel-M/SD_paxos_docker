@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cliente Paxos - Histórico</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/css/styles.css') }}">
+    <meta http-equiv="refresh" content="10">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Cliente Paxos - {{ client_id }}</h1>
+            <nav>
+                <ul>
+                    <li><a href="/">Dashboard</a></li>
+                    <li><a href="/resources">Recursos</a></li>
+                    <li><a href="/history" class="active">Histórico</a></li>
+                    <li><a href="/logs">Logs</a></li>
+                    <li><a href="/system-logs">Logs do Sistema</a></li>
+                </ul>
+            </nav>
+        </header>
+
+        <main>
+            <section class="history-panel">
+                <h2>Histórico de Operações</h2>
+                <div class="filters">
+                    <div class="filter-group">
+                        <label for="status-filter">Status:</label>
+                        <select id="status-filter">
+                            <option value="all">Todos</option>
+                            <option value="COMMITTED">Confirmado</option>
+                            <option value="NOT_COMMITTED">Não Confirmado</option>
+                            <option value="in_progress">Em Progresso</option>
+                            <option value="timeout">Timeout</option>
+                            <option value="failed">Falha</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="sort-order">Ordenar por:</label>
+                        <select id="sort-order">
+                            <option value="newest">Mais recentes primeiro</option>
+                            <option value="oldest">Mais antigos primeiro</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="table-container">
+                    <table id="operations-table">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Instance ID</th>
+                                <th>Início</th>
+                                <th>Fim</th>
+                                <th>Duração</th>
+                                <th>Status</th>
+                                <th>Ações</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for op in operations %}
+                            <tr data-status="{{ op.status }}">
+                                <td>{{ op.id }}</td>
+                                <td>{{ op.instance_id if 'instance_id' in op else '-' }}</td>
+                                <td>{{ op.start_time|int }}</td>
+                                <td>{{ op.end_time|int if 'end_time' in op else '-' }}</td>
+                                <td>{{ "%.2f"|format(op.latency) if 'latency' in op else '-' }}s</td>
+                                <td class="status-{{ op.status }}">{{ op.status }}</td>
+                                <td>
+                                    <button class="button small view-details" data-id="{{ op.id }}">Detalhes</button>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <div id="operation-details-modal" class="modal">
+                <div class="modal-content">
+                    <span class="close">&times;</span>
+                    <h2>Detalhes da Operação</h2>
+                    <div id="operation-details"></div>
+                </div>
+            </div>
+        </main>
+
+        <footer>
+            <p>Cliente Paxos - Sistema de Consenso Distribuído</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', path='/js/main.js') }}"></script>
+</body>
+</html>

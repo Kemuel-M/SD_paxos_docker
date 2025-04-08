@@ -1,62 +1,20 @@
-import asyncio
-import json
-import logging
+"""
+Funções de utilidade geral compartilhadas entre componentes.
+"""
 import os
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Union
+import json
+import random
+import asyncio
+from typing import Dict, Any, List, Optional, Tuple, Union
 
-logger = logging.getLogger(__name__)
-
-def get_env_var(var_name: str, default: Any = None) -> Any:
+def generate_unique_id() -> str:
     """
-    Obtém uma variável de ambiente, com valor padrão opcional.
-    
-    Args:
-        var_name: Nome da variável de ambiente
-        default: Valor padrão caso a variável não exista
-        
-    Returns:
-        Valor da variável de ambiente ou o valor padrão
-    """
-    return os.environ.get(var_name, default)
-
-def get_debug_mode() -> bool:
-    """
-    Verifica se o modo de depuração está ativado.
+    Gera um ID único.
     
     Returns:
-        bool: True se o modo de depuração estiver ativado, False caso contrário
-    """
-    debug_env = get_env_var("DEBUG", "false").lower()
-    return debug_env in ("true", "1", "yes")
-
-def setup_logging(component_id: str, debug: bool = None) -> None:
-    """
-    Configura o sistema de logging para o componente.
-    
-    Args:
-        component_id: ID do componente
-        debug: Flag para ativar o modo de depuração (se None, usa o valor da variável DEBUG)
-    """
-    if debug is None:
-        debug = get_debug_mode()
-    
-    log_level = logging.DEBUG if debug else logging.INFO
-    
-    logging.basicConfig(
-        level=log_level,
-        format=f'[{component_id}] %(asctime)s - %(levelname)s - %(message)s'
-    )
-    
-    logger.debug(f"Logging configurado para {component_id} (debug={debug})")
-
-def generate_id() -> str:
-    """
-    Gera um ID único usando UUID4.
-    
-    Returns:
-        str: ID único gerado
+        str: ID único baseado em UUID
     """
     return str(uuid.uuid4())
 
@@ -69,149 +27,185 @@ def current_timestamp() -> int:
     """
     return int(time.time() * 1000)
 
-async def http_request(method: str, url: str, data: Dict = None, 
-                       timeout: float = 5.0, retries: int = 3, 
-                       backoff_factor: float = 0.5) -> Dict:
+def calculate_backoff(attempt: int, base: float = 0.5, jitter: float = 0.2) -> float:
     """
-    Executa uma requisição HTTP com retry e backoff exponencial.
+    Calcula tempo de espera com backoff exponencial e jitter.
     
     Args:
-        method: Método HTTP (GET, POST, etc.)
-        url: URL do endpoint
-        data: Dados a serem enviados (para POST, PUT, etc.)
-        timeout: Tempo máximo de espera pela resposta
-        retries: Número máximo de tentativas
-        backoff_factor: Fator para o cálculo do tempo de espera entre tentativas
+        attempt: Número da tentativa (0-based)
+        base: Tempo base em segundos
+        jitter: Fator de jitter (0.0-1.0)
     
     Returns:
-        Dict: Resposta da requisição como dicionário ou erro
+        float: Tempo de espera em segundos
     """
-    import aiohttp
+    # Calcula backoff exponencial
+    backoff_time = base * (2 ** attempt)
     
-    attempt = 0
-    last_exception = None
+    # Adiciona jitter (±jitter%)
+    jitter_amount = backoff_time * jitter * (2 * random.random() - 1)
     
-    while attempt < retries:
-        try:
-            async with aiohttp.ClientSession() as session:
-                if method.upper() == 'GET':
-                    async with session.get(url, timeout=timeout) as response:
-                        if response.status == 200:
-                            return await response.json()
-                        else:
-                            return {
-                                "error": f"HTTP error: {response.status}",
-                                "status": response.status
-                            }
-                elif method.upper() == 'POST':
-                    async with session.post(url, json=data, timeout=timeout) as response:
-                        if response.status in (200, 201):
-                            return await response.json()
-                        else:
-                            return {
-                                "error": f"HTTP error: {response.status}",
-                                "status": response.status
-                            }
-                else:
-                    return {"error": f"Método HTTP não suportado: {method}"}
-        except Exception as e:
-            last_exception = e
-            attempt += 1
-            
-            if attempt < retries:
-                # Calcula o tempo de espera com backoff exponencial
-                wait_time = backoff_factor * (2 ** (attempt - 1))
-                logger.warning(f"Tentativa {attempt} falhou: {str(e)}. Tentando novamente em {wait_time:.1f}s")
-                await asyncio.sleep(wait_time)
-            else:
-                logger.error(f"Todas as {retries} tentativas falharam: {str(e)}")
-    
-    return {
-        "error": f"Todas as tentativas falharam: {str(last_exception)}",
-        "status": 0
-    }
+    return max(0, backoff_time + jitter_amount)
 
-def parse_json(data: str) -> Dict:
+async def wait_with_backoff(attempt: int, base: float = 0.5, jitter: float = 0.2):
     """
-    Faz o parse de uma string JSON com tratamento de erros.
+    Espera um tempo com backoff exponencial e jitter.
+    
+    Args:
+        attempt: Número da tentativa (0-based)
+        base: Tempo base em segundos
+        jitter: Fator de jitter (0.0-1.0)
+    """
+    wait_time = calculate_backoff(attempt, base, jitter)
+    await asyncio.sleep(wait_time)
+
+def safe_json_loads(data: str, default: Any = None) -> Any:
+    """
+    Carrega JSON de forma segura.
     
     Args:
         data: String JSON
+        default: Valor padrão se falhar
     
     Returns:
-        Dict: Dados parseados ou dicionário de erro
+        Any: Objeto Python convertido do JSON ou default
     """
     try:
         return json.loads(data)
-    except json.JSONDecodeError as e:
-        logger.error(f"Erro ao fazer parse do JSON: {str(e)}")
-        return {"error": f"Erro ao fazer parse do JSON: {str(e)}"}
+    except Exception:
+        return default
 
-def validate_resource_data(data: Dict) -> bool:
+def safe_json_dumps(obj: Any, default: str = "{}") -> str:
     """
-    Valida se os dados do recurso R estão no formato correto.
+    Converte objeto para JSON de forma segura.
     
     Args:
-        data: Dados do recurso R
+        obj: Objeto Python
+        default: String padrão se falhar
     
     Returns:
-        bool: True se os dados são válidos, False caso contrário
+        str: String JSON
     """
-    # Implementação simples para validação de dados do recurso
-    # Pode ser expandida conforme necessário
-    if not isinstance(data, dict):
-        return False
-    
-    # Adicione validações específicas para o formato do recurso R aqui
-    
-    return True
+    try:
+        return json.dumps(obj)
+    except Exception:
+        return default
 
-class DistributedCounter:
+def hash_consistent(key: str, num_buckets: int) -> int:
     """
-    Implementação de um contador distribuído seguro para geração de TIDs.
+    Implementa hashing consistente para distribuição de carga.
+    
+    Args:
+        key: Chave a ser hasheada
+        num_buckets: Número de buckets
+    
+    Returns:
+        int: Índice do bucket (0 a num_buckets-1)
     """
+    # Usa hash interno do Python, que é diferente em cada execução
+    # Para consistência, precisamos usar um método fixo
+    hash_value = 0
+    for char in key:
+        hash_value = ((hash_value * 31) + ord(char)) & 0xFFFFFFFF
     
-    def __init__(self, initial_value: int = 0):
-        """
-        Inicializa o contador distribuído.
-        
-        Args:
-            initial_value: Valor inicial do contador
-        """
-        self.value = initial_value
-        self.lock = asyncio.Lock()
+    return hash_value % num_buckets
+
+def parse_id_from_address(address: str) -> Optional[int]:
+    """
+    Extrai ID de um endereço no formato 'component-X:port'.
     
-    async def get_next(self) -> int:
-        """
-        Obtém o próximo valor do contador de forma thread-safe.
-        
-        Returns:
-            int: Próximo valor do contador
-        """
-        async with self.lock:
-            self.value += 1
-            return self.value
+    Args:
+        address: Endereço no formato 'component-X:port'
     
-    async def update_if_greater(self, new_value: int) -> int:
-        """
-        Atualiza o contador se o novo valor for maior que o valor atual.
-        
-        Args:
-            new_value: Novo valor proposto para o contador
-        
-        Returns:
-            int: Valor atual do contador após a possível atualização
-        """
-        async with self.lock:
-            if new_value > self.value:
-                self.value = new_value
-            return self.value
+    Returns:
+        Optional[int]: ID extraído ou None se não for possível extrair
+    """
+    try:
+        # Exemplo: 'proposer-3:8080' -> 3
+        parts = address.split(':')[0].split('-')
+        if len(parts) >= 2:
+            return int(parts[-1])
+        return None
+    except Exception:
+        return None
+
+def get_round_robin_item(items: List[Any], current_index: int) -> Tuple[Any, int]:
+    """
+    Seleciona próximo item em esquema round-robin.
     
-    def get_current(self) -> int:
-        """
-        Obtém o valor atual do contador.
-        
-        Returns:
-            int: Valor atual do contador
-        """
-        return self.value
+    Args:
+        items: Lista de itens
+        current_index: Índice atual
+    
+    Returns:
+        Tuple[Any, int]: Próximo item e novo índice
+    """
+    if not items:
+        raise ValueError("Lista vazia")
+    
+    next_index = (current_index + 1) % len(items)
+    return items[next_index], next_index
+
+def deep_merge(dict1: Dict[str, Any], dict2: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Mescla dois dicionários profundamente.
+    
+    Args:
+        dict1: Primeiro dicionário
+        dict2: Segundo dicionário (prevalece em caso de conflito)
+    
+    Returns:
+        Dict[str, Any]: Dicionário mesclado
+    """
+    result = dict1.copy()
+    
+    for key, value in dict2.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = value
+    
+    return result
+
+def parse_range(range_str: str) -> Tuple[int, int]:
+    """
+    Converte uma string de faixa (ex: "1-5") para tupla de inteiros.
+    
+    Args:
+        range_str: String no formato "min-max"
+    
+    Returns:
+        Tuple[int, int]: Tupla (min, max)
+    """
+    try:
+        parts = range_str.split('-')
+        if len(parts) == 2:
+            return int(parts[0]), int(parts[1])
+        return int(parts[0]), int(parts[0])
+    except Exception:
+        raise ValueError(f"Formato de faixa inválido: {range_str}")
+
+def random_delay(min_delay: float, max_delay: float) -> float:
+    """
+    Gera um tempo de espera aleatório dentro de uma faixa.
+    
+    Args:
+        min_delay: Tempo mínimo em segundos
+        max_delay: Tempo máximo em segundos
+    
+    Returns:
+        float: Tempo de espera em segundos
+    """
+    return min_delay + (random.random() * (max_delay - min_delay))
+
+async def wait_random_delay(min_delay: float, max_delay: float):
+    """
+    Espera um tempo aleatório dentro de uma faixa.
+    
+    Args:
+        min_delay: Tempo mínimo em segundos
+        max_delay: Tempo máximo em segundos
+    """
+    delay = random_delay(min_delay, max_delay)
+    await asyncio.sleep(delay)
+    return delay

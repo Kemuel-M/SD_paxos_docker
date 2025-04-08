@@ -1,88 +1,142 @@
-import argparse
-import asyncio
-import logging
+#!/usr/bin/env python3
+"""
+File: client/main.py
+Ponto de entrada da aplicação Cliente.
+Responsável por inicializar o cliente Paxos e o servidor web.
+"""
 import os
 import sys
-import time
+import logging
+import asyncio
+import signal
+import threading
 import uvicorn
-from typing import Dict, List
+from fastapi import FastAPI
 
-# Add parent directory to path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# Adiciona diretório atual ao PYTHONPATH
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # Para common
 
-from common.utils import get_debug_mode, setup_logging
-from client.api import app as api_app, initialize as init_api, set_proposer
-from client.web_server import web_app, initialize as init_web
+from api import create_api
+from client import PaxosClient
+from web_server import WebServer
+from common.logging import setup_logging
 
-# Configuração do logger
-logger = logging.getLogger(__name__)
+# Carrega configurações
+CLIENT_ID = os.getenv("CLIENT_ID", "client-1")
+NODE_ID = int(os.getenv("NODE_ID", CLIENT_ID.split("-")[1]))
+API_PORT = int(os.getenv("API_PORT", 8080))
+WEB_PORT = int(os.getenv("WEB_PORT", 8081))
+DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
+DEBUG_LEVEL = os.getenv("DEBUG_LEVEL", "basic").lower()  # Níveis: basic, advanced, trace
+PROPOSER = os.getenv("PROPOSER", f"proposer-{NODE_ID}:8080")
+NUM_OPERATIONS = int(os.getenv("NUM_OPERATIONS", "0"))  # 0 para aleatório
+AUTO_START = os.getenv("AUTO_START", "false").lower() in ("true", "1", "yes")
+LOG_DIR = os.getenv("LOG_DIR", "/data/logs")
 
-async def main():
-    """
-    Função principal do componente Client.
-    """
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Client - Paxos Consensus System')
-    parser.add_argument('--id', type=str, help='Unique ID for this client')
-    parser.add_argument('--port', type=int, default=8400, help='Port to run the server on')
-    parser.add_argument('--web-port', type=int, default=8500, help='Port to run the web server on')
-    parser.add_argument('--proposer', type=str, help='URL of the proposer to connect to')
-    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
-    parser.add_argument('--auto-start', action='store_true', help='Automatically start sending requests')
-    parser.add_argument('--num-requests', type=int, help='Number of requests to send if auto-start is enabled')
+logger = logging.getLogger("client")
+
+# Variáveis globais
+client = None
+api_app = None
+web_server = None
+api_server = None
+should_exit = threading.Event()
+
+async def shutdown():
+    """Função para desligar graciosamente o serviço"""
+    logger.important(f"Cliente {CLIENT_ID} está sendo desligado...")
     
-    args = parser.parse_args()
+    global client, api_server
     
-    # Determine debug mode
-    debug = args.debug if args.debug is not None else get_debug_mode()
+    # Para o cliente
+    if client:
+        await client.stop()
+        logger.info("Cliente parado")
     
-    # If ID is not provided, generate one from environment or random
-    client_id = args.id or os.environ.get('CLIENT_ID') or f"client_{int(time.time())}"
+    # Para o servidor web (via signal para o uvicorn)
+    if api_server:
+        api_server.should_exit = True
+        logger.info("Servidor API sinalizado para parar")
     
-    # Setup logging
-    setup_logging(f"client_{client_id}", debug)
+    logger.important(f"Cliente {CLIENT_ID} desligado com sucesso.")
+
+def start_api_server():
+    """Inicia o servidor da API em uma thread separada."""
+    global api_app, api_server
     
-    logger.info(f"Starting client {client_id} (API on port {args.port}, Web on port {args.web_port})")
+    # Configura o servidor uvicorn
+    config = uvicorn.Config(api_app, host="0.0.0.0", port=API_PORT)
+    api_server = uvicorn.Server(config)
     
-    # Determine proposer URL
-    proposer_url = args.proposer or os.environ.get('PROPOSER_URL')
-    if not proposer_url:
-        # Default to a random proposer (for the example)
-        proposer_idx = hash(client_id) % 5 + 1  # Distribute clients among 5 proposers
-        proposer_url = f"http://localhost:{8000 + proposer_idx - 1}"
-        logger.info(f"No proposer specified. Using proposer_{proposer_idx} at {proposer_url}")
+    # Inicia o servidor (bloqueante)
+    api_server.run()
     
-    # Initialize the API
-    init_api(client_id, proposer_url, debug)
+    logger.info(f"Servidor API encerrado")
+
+def main():
+    # Configura o logger com suporte a níveis de debug
+    setup_logging(f"client-{NODE_ID}", debug=DEBUG, debug_level=DEBUG_LEVEL, log_dir=LOG_DIR)
+    logger.important(f"Iniciando Cliente {CLIENT_ID}...")
     
-    # Initialize the web server
-    from client.api import client
-    init_web(client)
+    if DEBUG:
+        logger.info(f"Modo DEBUG ativado com nível: {DEBUG_LEVEL}")
+        logger.info(f"Configuração: API_PORT={API_PORT}, WEB_PORT={WEB_PORT}, PROPOSER={PROPOSER}")
     
-    # Run both API and web servers concurrently
-    api_config = uvicorn.Config(api_app, host="0.0.0.0", port=args.port, log_level="info")
-    web_config = uvicorn.Config(web_app, host="0.0.0.0", port=args.web_port, log_level="info")
+    # Determina URL do proposer baseado na variável de ambiente
+    proposer_url = f"http://{PROPOSER}"
     
-    api_server = uvicorn.Server(api_config)
-    web_server = uvicorn.Server(web_config)
+    # Determina URL de callback baseado no ID do cliente
+    callback_url = f"http://{CLIENT_ID}:{API_PORT}/notification"
     
-    # If auto-start is enabled, start sending requests
-    if args.auto_start:
-        logger.info(f"Auto-start enabled. Will send {args.num_requests or 'random number of'} requests.")
-        
-        # Wait a bit for servers to start before sending requests
-        await asyncio.sleep(2)
-        
-        # Import client from API and start requests
-        from client.api import client
-        if client:
-            await client.start_random_requests(args.num_requests)
-    
-    # Run both servers
-    await asyncio.gather(
-        api_server.serve(),
-        web_server.serve()
+    # Cria o cliente
+    global client
+    client = PaxosClient(
+        client_id=CLIENT_ID,
+        proposer_url=proposer_url,
+        callback_url=callback_url,
+        num_operations=NUM_OPERATIONS if NUM_OPERATIONS > 0 else None
     )
+    
+    # Cria a API
+    global api_app
+    api_app = create_api(client)
+    
+    # Configura callback para shutdown gracioso
+    @api_app.on_event("shutdown")
+    async def on_api_shutdown():
+        logger.info("Evento de shutdown da API detectado")
+    
+    # Configura manipuladores de sinal para shutdown gracioso
+    loop = asyncio.get_event_loop()
+    signals = (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
+    for s in signals:
+        loop.add_signal_handler(
+            s, lambda s=s: asyncio.create_task(shutdown())
+        )
+    
+    # Inicia o servidor API em uma thread separada
+    api_thread = threading.Thread(target=start_api_server, daemon=True)
+    api_thread.start()
+    logger.info(f"Servidor API iniciado em 0.0.0.0:{API_PORT}")
+    
+    # Inicia o servidor web
+    web_server = WebServer(client, port=WEB_PORT)
+    
+    # Inicia cliente automaticamente se configurado
+    if AUTO_START:
+        asyncio.run_coroutine_threadsafe(client.start(), loop)
+        logger.info("Cliente iniciado automaticamente")
+    
+    # Inicia o servidor web (bloqueante)
+    try:
+        logger.important(f"Cliente {CLIENT_ID} iniciado e servidores escutando nas portas API:{API_PORT}, Web:{WEB_PORT}")
+        web_server.start()
+    except KeyboardInterrupt:
+        logger.info("Interrupção de teclado detectada")
+    finally:
+        # Executa shutdown antes de encerrar
+        asyncio.run(shutdown())
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

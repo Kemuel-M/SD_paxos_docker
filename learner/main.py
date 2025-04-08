@@ -1,118 +1,110 @@
-import argparse
-import asyncio
-import logging
+#!/usr/bin/env python3
+"""
+File: learner/main.py
+Entry point for the Learner application.
+Responsible for initializing the HTTP server and loading configurations.
+Supports multiple debug levels.
+"""
 import os
 import sys
-import time
+import logging
+import asyncio
+import signal
 import uvicorn
-from typing import Dict, List
+from fastapi import FastAPI
 
-# Add parent directory to path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# Add current directory to PYTHONPATH
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # For common modules
 
-from common.heartbeat import HeartbeatSystem
-from common.utils import get_debug_mode, setup_logging
-from learner.api import app, initialize, set_acceptor_count, add_store, add_client
+from api import create_api
+from learner import Learner
+from consensus import ConsensusManager
+from rowa import RowaManager
+from two_phase import TwoPhaseCommitManager
+from common.logging import setup_logging
 
-# Configuração do logger
-logger = logging.getLogger(__name__)
+# Load configurations
+NODE_ID = int(os.getenv("NODE_ID", 1))
+PORT = int(os.getenv("PORT", 8080))
+DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
+DEBUG_LEVEL = os.getenv("DEBUG_LEVEL", "basic").lower()  # Levels: basic, advanced, trace
+ACCEPTORS = os.getenv("ACCEPTORS", "acceptor-1:8080,acceptor-2:8080,acceptor-3:8080,acceptor-4:8080,acceptor-5:8080").split(",")
+STORES = os.getenv("STORES", "cluster-store-1:8080,cluster-store-2:8080,cluster-store-3:8080").split(",")
+USE_CLUSTER_STORE = os.getenv("USE_CLUSTER_STORE", "false").lower() in ("true", "1", "yes")
+LOG_DIR = os.getenv("LOG_DIR", "/data/logs")
+DATA_DIR = os.getenv("DATA_DIR", "/data")
 
-async def main():
-    """
-    Função principal do componente Learner.
-    """
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Learner - Paxos Consensus System')
-    parser.add_argument('--id', type=str, help='Unique ID for this learner')
-    parser.add_argument('--port', type=int, default=8200, help='Port to run the server on')
-    parser.add_argument('--acceptors', type=str, help='Comma-separated list of acceptor URLs')
-    parser.add_argument('--stores', type=str, help='Comma-separated list of store URLs')
-    parser.add_argument('--clients', type=str, help='Comma-separated list of client URLs')
-    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
-    parser.add_argument('--rowa', action='store_true', help='Enable ROWA protocol')
+logger = logging.getLogger("learner")
+
+async def shutdown(app, learner):
+    """Function to gracefully shut down the service"""
+    logger.important(f"Learner {NODE_ID} is being shut down...")
     
-    args = parser.parse_args()
+    # Stop the learner
+    await learner.stop()
+    logger.info("Learner stopped")
     
-    # Determine debug mode
-    debug = args.debug if args.debug is not None else get_debug_mode()
+    logger.important(f"Learner {NODE_ID} shut down successfully.")
+
+def main():
+    # Configure the logger with debug level support
+    setup_logging(f"learner-{NODE_ID}", debug=DEBUG, debug_level=DEBUG_LEVEL, log_dir=LOG_DIR)
+    logger.important(f"Starting Learner {NODE_ID}...")
     
-    # If ID is not provided, generate one from environment or random
-    learner_id = args.id or os.environ.get('LEARNER_ID') or f"learner_{int(time.time())}"
+    if DEBUG:
+        logger.info(f"DEBUG mode enabled with level: {DEBUG_LEVEL}")
+        logger.info(f"Configuration: PORT={PORT}, ACCEPTORS={len(ACCEPTORS)}, STORES={len(STORES)}, USE_CLUSTER_STORE={USE_CLUSTER_STORE}")
     
-    # Setup logging
-    setup_logging(f"learner_{learner_id}", debug)
+    # Create data directories if they don't exist
+    os.makedirs(LOG_DIR, exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
     
-    logger.info(f"Starting learner {learner_id} on port {args.port}")
+    # Create the ConsensusManager
+    consensus_manager = ConsensusManager(NODE_ID)
     
-    # Initialize the learner
-    initialize(learner_id, debug)
+    # Create the RowaManager if USE_CLUSTER_STORE is enabled
+    rowa_manager = None
+    if USE_CLUSTER_STORE:
+        two_phase_manager = TwoPhaseCommitManager(NODE_ID, STORES)
+        rowa_manager = RowaManager(NODE_ID, STORES, two_phase_manager)
     
-    # Parse acceptors
-    acceptor_count = 5  # Default value
-    if args.acceptors:
-        acceptors = args.acceptors.split(',')
-        acceptor_count = len(acceptors)
-    else:
-        # Default acceptors from environment variables
-        acceptors_env = os.environ.get('ACCEPTORS', '')
-        if acceptors_env:
-            acceptors = acceptors_env.split(',')
-            acceptor_count = len(acceptors)
+    # Create learner instance
+    learner = Learner(
+        node_id=NODE_ID,
+        acceptors=ACCEPTORS,
+        stores=STORES if USE_CLUSTER_STORE else None,
+        consensus_manager=consensus_manager,
+        rowa_manager=rowa_manager,
+        use_cluster_store=USE_CLUSTER_STORE
+    )
     
-    # Set acceptor count
-    set_acceptor_count(acceptor_count)
-    logger.info(f"Configured for {acceptor_count} acceptors")
+    # Create API
+    app = create_api(learner, consensus_manager, rowa_manager)
     
-    # Parse stores list
-    if args.stores:
-        stores = args.stores.split(',')
-        for i, store_url in enumerate(stores):
-            store_id = f"store_{i+1}"
-            add_store(store_id, store_url.strip())
-    else:
-        # Default stores from environment variables
-        stores_env = os.environ.get('STORES', '')
-        if stores_env:
-            stores = stores_env.split(',')
-            for i, store_url in enumerate(stores):
-                store_id = f"store_{i+1}"
-                add_store(store_id, store_url.strip())
-        else:
-            logger.warning("No stores specified. Using default localhost stores.")
-            for i in range(3):  # Default: 3 stores
-                port = 8300 + i
-                store_id = f"store_{i+1}"
-                add_store(store_id, f"http://localhost:{port}")
+    # Configure callback for graceful shutdown
+    @app.on_event("shutdown")
+    async def on_shutdown():
+        await shutdown(app, learner)
     
-    # Parse clients list
-    if args.clients:
-        clients = args.clients.split(',')
-        for i, client_url in enumerate(clients):
-            client_id = f"client_{i+1}"
-            add_client(client_id, client_url.strip())
-    else:
-        # Default clients from environment variables
-        clients_env = os.environ.get('CLIENTS', '')
-        if clients_env:
-            clients = clients_env.split(',')
-            for i, client_url in enumerate(clients):
-                client_id = f"client_{i+1}"
-                add_client(client_id, client_url.strip())
-        else:
-            logger.warning("No clients specified. Using default localhost clients.")
-            for i in range(5):  # Default: 5 clients
-                port = 8400 + i
-                client_id = f"client_{i+1}"
-                add_client(client_id, f"http://localhost:{port}")
+    # Startup tasks
+    @app.on_event("startup")
+    async def on_startup():
+        # Start the learner
+        await learner.start()
+        logger.info("Learner started")
     
-    # Start the heartbeat system if needed
-    # heartbeat = HeartbeatSystem(learner_id, debug)
-    # heartbeat.start()
+    # Configure signal handlers for graceful shutdown
+    loop = asyncio.get_event_loop()
+    signals = (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
+    for s in signals:
+        loop.add_signal_handler(
+            s, lambda s=s: asyncio.create_task(shutdown(app, learner))
+        )
     
-    # Run the FastAPI server
-    config = uvicorn.Config(app, host="0.0.0.0", port=args.port, log_level="info")
-    server = uvicorn.Server(config)
-    await server.serve()
+    # Start the server
+    logger.important(f"Learner {NODE_ID} started and listening on port {PORT}")
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

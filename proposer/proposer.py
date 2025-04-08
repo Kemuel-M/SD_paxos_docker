@@ -1,628 +1,700 @@
-import asyncio
-import logging
-import random
+"""
+File: proposer/proposer.py
+Implementação principal do Proposer do algoritmo Paxos.
+Responsável por iniciar o processo de consenso e coordenar as fases do protocolo.
+Com melhorias para tratamento de casos de borda e debugging.
+"""
+import os
 import time
-from typing import Dict, List, Optional, Set, Tuple, Union
+import logging
+import asyncio
+import random
+from typing import Dict, List, Any, Optional, Tuple
+from collections import defaultdict
 
-from common.utils import (
-    DistributedCounter, current_timestamp, generate_id, http_request
-)
+from common.communication import HttpClient, CircuitBreaker
+from common.utils import calculate_backoff, wait_with_backoff, current_timestamp
 
-logger = logging.getLogger(__name__)
+# Configuração aprimorada de debug
+DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
+DEBUG_LEVEL = os.getenv("DEBUG_LEVEL", "basic").lower()  # Níveis: basic, advanced, trace
+USE_CLUSTER_STORE = os.getenv("USE_CLUSTER_STORE", "false").lower() in ("true", "1", "yes")
 
-class ProposerState:
-    """Enum para representar os estados possíveis de uma proposta"""
-    IDLE = "idle"              # Estado inicial
-    PREPARING = "preparing"    # Fase de prepare
-    ACCEPTING = "accepting"    # Fase de accept
-    COMMITTED = "committed"    # Proposta aceita
-    REJECTED = "rejected"      # Proposta rejeitada
-    FAILED = "failed"          # Falha na proposta
+logger = logging.getLogger("proposer")
 
 class Proposer:
     """
-    Implementação do proposer do algoritmo Paxos.
-    Responsável por propor valores para os acceptors e coordenar o consenso.
+    Implementação do Proposer do algoritmo Paxos.
+    
+    O Proposer é responsável por:
+    1. Receber requisições de clientes
+    2. Iniciar o processo de consenso (fases Prepare e Accept)
+    3. Coordenar com Acceptors para chegar a um consenso
+    4. Gerenciar o estado das propostas em andamento
     """
     
-    def __init__(self, proposer_id: str, debug: bool = False):
+    def __init__(self, node_id: int, acceptors: List[str], learners: List[str], 
+                 stores: List[str], proposal_counter: int = 0, last_instance_id: int = 0):
         """
-        Inicializa o proposer.
+        Inicializa o Proposer.
         
         Args:
-            proposer_id: ID único do proposer
-            debug: Flag para ativar modo de depuração
+            node_id: ID único deste Proposer (1-5)
+            acceptors: Lista de endereços dos Acceptors
+            learners: Lista de endereços dos Learners
+            stores: Lista de endereços dos Cluster Stores
+            proposal_counter: Contador inicial de propostas
+            last_instance_id: Último ID de instância processado
         """
-        self.id = proposer_id
-        self.debug = debug
+        self.node_id = node_id
+        self.acceptors = acceptors if acceptors else []
+        self.learners = learners if learners else []
+        self.stores = stores if stores else []
+        self.proposal_counter = proposal_counter
+        self.last_instance_id = last_instance_id
+
+        self.instance_id_lock = asyncio.Lock()
+        self.proposal_counter_lock = asyncio.Lock()
+        
+        # Estado das propostas (instanceId -> estado)
+        self.proposals = {}
+        
+        # Fila de propostas pendentes
+        self.pending_queue = asyncio.Queue()
+        
+        # Executor de propostas (background task)
+        self.executor_task = None
+        
+        # Cliente HTTP com circuit breaker
+        self.http_client = HttpClient()
+        
+        # Circuit breakers para cada endpoint (endereço -> circuitbreaker)
+        self.circuit_breakers = defaultdict(lambda: CircuitBreaker())
+        
+        # Estado atual do proposer
+        self.state = "initialized"
+        
+        # Indica se é o líder (será gerenciado pelo LeaderElection)
         self.is_leader = False
-        self.current_leader: Optional[str] = None
         
-        # TID (Transaction ID) é um contador usado para ordenar as propostas
-        self.tid_counter = DistributedCounter(initial_value=0)
+        # Counter para round-robin dos nós do Cluster Store
+        self.store_index = 0
         
-        # Lista de acceptors
-        self.acceptors: Dict[str, str] = {}  # {acceptor_id: url}
+        logger.info(f"Proposer {node_id} inicializado com {len(acceptors)} acceptors, "
+                    f"{len(learners)} learners e {len(stores)} nós de armazenamento")
         
-        # Lista de learners
-        self.learners: Dict[str, str] = {}  # {learner_id: url}
-        
-        # Lista de stores
-        self.stores: Dict[str, str] = {}  # {store_id: url}
-        
-        # Propostas em andamento
-        self.proposals: Dict[str, Dict] = {}
-        
-        # Locks para operações concorrentes
-        self.leader_lock = asyncio.Lock()
-        self.proposal_lock = asyncio.Lock()
-        
-        logger.debug(f"Proposer {proposer_id} inicializado (debug={debug})")
+        if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
+            logger.debug(f"Configuração detalhada do Proposer {node_id}:")
+            logger.debug(f"- Acceptors: {self.acceptors}")
+            logger.debug(f"- Learners: {self.learners}")
+            logger.debug(f"- Stores: {self.stores}")
+            logger.debug(f"- proposal_counter inicial: {self.proposal_counter}")
+            logger.debug(f"- last_instance_id inicial: {self.last_instance_id}")
     
-    def add_acceptor(self, acceptor_id: str, url: str) -> None:
-        """
-        Adiciona um acceptor à lista de acceptors conhecidos.
-        
-        Args:
-            acceptor_id: ID do acceptor
-            url: URL base do acceptor
-        """
-        self.acceptors[acceptor_id] = url
-        logger.debug(f"Acceptor adicionado: {acceptor_id} -> {url}")
+    async def start(self):
+        """Inicia o processador de propostas em background."""
+        self.state = "running"
+        self.executor_task = asyncio.create_task(self._proposal_executor())
+        logger.info(f"Processador de propostas iniciado")
     
-    def add_learner(self, learner_id: str, url: str) -> None:
-        """
-        Adiciona um learner à lista de learners conhecidos.
-        
-        Args:
-            learner_id: ID do learner
-            url: URL base do learner
-        """
-        self.learners[learner_id] = url
-        logger.debug(f"Learner adicionado: {learner_id} -> {url}")
+    async def stop(self):
+        """Para o processador de propostas."""
+        if self.executor_task and not self.executor_task.done():
+            self.state = "stopping"
+            logger.info(f"Parando processador de propostas...")
+            self.executor_task.cancel()
+            try:
+                await self.executor_task
+            except asyncio.CancelledError:
+                pass
+        self.state = "stopped"
+        logger.info(f"Processador de propostas parado")
     
-    def add_store(self, store_id: str, url: str) -> None:
-        """
-        Adiciona um store à lista de stores conhecidos.
-        
-        Args:
-            store_id: ID do store
-            url: URL base do store
-        """
-        self.stores[store_id] = url
-        logger.debug(f"Store adicionado: {store_id} -> {url}")
-    
-    async def set_leader(self, leader_id: str) -> None:
-        """
-        Define o líder atual do cluster.
-        
-        Args:
-            leader_id: ID do proposer líder
-        """
-        async with self.leader_lock:
-            self.current_leader = leader_id
-            self.is_leader = (leader_id == self.id)
-            logger.info(f"Líder definido: {leader_id} (este proposer é líder: {self.is_leader})")
-    
-    async def get_next_tid(self) -> int:
-        """
-        Obtém o próximo TID (Transaction ID) para uma proposta.
-        
-        Returns:
-            int: O próximo TID
-        """
-        return await self.tid_counter.get_next()
-    
-    async def update_tid(self, new_tid: int) -> None:
-        """
-        Atualiza o TID se o novo valor for maior que o atual.
-        
-        Args:
-            new_tid: Novo valor de TID proposto
-        """
-        await self.tid_counter.update_if_greater(new_tid)
-        logger.debug(f"TID atualizado para {new_tid}")
-    
-    async def prepare(self, proposal_id: str, client_id: str, 
-                     resource_data: Dict, timestamp: int) -> Tuple[bool, int]:
-        """
-        Executa a fase de prepare do algoritmo Paxos.
-        
-        Args:
-            proposal_id: ID único da proposta
-            client_id: ID do cliente que fez a solicitação
-            resource_data: Dados do recurso a serem propostos
-            timestamp: Timestamp da proposta
-        
-        Returns:
-            Tuple[bool, int]: (sucesso, novo_tid)
-                - sucesso: True se a fase prepare foi bem-sucedida
-                - novo_tid: O TID a ser usado na fase de accept
-        """
-        # Gera um novo TID para esta proposta
-        tid = await self.get_next_tid()
-        
-        # Cria o objeto de proposta
-        async with self.proposal_lock:
-            self.proposals[proposal_id] = {
-                "id": proposal_id,
-                "tid": tid,
-                "client_id": client_id,
-                "resource_data": resource_data,
-                "timestamp": timestamp,
-                "state": ProposerState.PREPARING,
-                "promises": {},
-                "rejections": {},
-                "highest_tid_seen": tid
-            }
-        
-        logger.info(f"Iniciando fase PREPARE para proposta {proposal_id} com TID={tid}")
-        
-        # Para manter o controle de quais acceptors responderam
-        promises_count = 0
-        rejections_count = 0
-        highest_tid = tid
-        highest_value = None
-        
-        # Envia PREPARE para todos os acceptors
-        prepare_tasks = []
-        
-        for acceptor_id, url in self.acceptors.items():
-            prepare_url = f"{url}/prepare"
-            prepare_data = {
-                "proposal_id": proposal_id,
-                "proposer_id": self.id,
-                "tid": tid
-            }
+    async def set_leader(self, is_leader: bool):
+        """Define se este proposer é o líder."""
+        # Atualiza o status apenas se for diferente do atual
+        if self.is_leader != is_leader:
+            old_status = "líder" if self.is_leader else "seguidor"
+            new_status = "líder" if is_leader else "seguidor"
+            logger.important(f"Status do nó {self.node_id} alterado: {old_status} -> {new_status}")
             
-            task = asyncio.create_task(
-                self._send_prepare(acceptor_id, prepare_url, prepare_data)
-            )
-            prepare_tasks.append(task)
-        
-        # Aguarda as respostas dos acceptors
-        for task in asyncio.as_completed(prepare_tasks):
-            result = await task
-            acceptor_id = result.get("acceptor_id")
-            success = result.get("success", False)
-            
-            if success:
-                # Recebeu um PROMISE
-                promises_count += 1
-                
-                # Armazena a promessa
-                async with self.proposal_lock:
-                    self.proposals[proposal_id]["promises"][acceptor_id] = result
-                
-                # Verifica se o acceptor já aceitou uma proposta anteriormente
-                acceptor_tid = result.get("accepted_tid")
-                acceptor_value = result.get("accepted_value")
-                
-                if acceptor_tid is not None and acceptor_tid > highest_tid:
-                    highest_tid = acceptor_tid
-                    highest_value = acceptor_value
-                    
-                    # Atualiza nosso contador de TID para ser maior que o maior TID visto
-                    await self.update_tid(highest_tid)
-            else:
-                # Recebeu um NOT_PROMISE
-                rejections_count += 1
-                
-                # Armazena a rejeição
-                async with self.proposal_lock:
-                    self.proposals[proposal_id]["rejections"][acceptor_id] = result
-                
-                # Atualiza o maior TID visto
-                reject_tid = result.get("tid")
-                if reject_tid and reject_tid > highest_tid:
-                    highest_tid = reject_tid
-                    
-                    # Atualiza nosso contador de TID
-                    await self.update_tid(highest_tid)
-        
-        # Determina se a fase PREPARE foi bem-sucedida
-        # (precisa de maioria, ou seja, mais da metade dos acceptors)
-        majority = len(self.acceptors) // 2 + 1
-        success = promises_count >= majority
-        
-        # Atualiza o estado da proposta
-        async with self.proposal_lock:
-            if proposal_id in self.proposals:
-                if success:
-                    self.proposals[proposal_id]["state"] = ProposerState.ACCEPTING
-                    self.proposals[proposal_id]["highest_tid_seen"] = highest_tid
-                    
-                    # Se algum acceptor já tinha aceitado um valor, vamos usar esse valor
-                    if highest_value is not None:
-                        self.proposals[proposal_id]["resource_data"] = highest_value
-                else:
-                    self.proposals[proposal_id]["state"] = ProposerState.REJECTED
-        
-        # Log do resultado
-        if success:
-            logger.info(f"Fase PREPARE bem-sucedida para proposta {proposal_id}: {promises_count} promises, {rejections_count} rejections")
-        else:
-            logger.warning(f"Fase PREPARE rejeitada para proposta {proposal_id}: {promises_count} promises, {rejections_count} rejections")
-        
-        return success, highest_tid
+        self.is_leader = is_leader
+        logger.info(f"Status de líder alterado para: {is_leader}")
     
-    async def _send_prepare(self, acceptor_id: str, url: str, data: Dict) -> Dict:
+    async def propose(self, client_request: Dict[str, Any]):
         """
-        Envia uma mensagem PREPARE para um acceptor específico.
+        Recebe uma requisição de cliente e a adiciona à fila de processamento.
         
         Args:
-            acceptor_id: ID do acceptor
-            url: URL do endpoint prepare do acceptor
-            data: Dados da proposta
-        
-        Returns:
-            Dict: Resposta do acceptor
+            client_request: Requisição do cliente
         """
-        try:
-            response = await http_request("POST", url, data=data)
-            response["acceptor_id"] = acceptor_id
-            return response
-        except Exception as e:
-            logger.error(f"Erro ao enviar PREPARE para acceptor {acceptor_id}: {str(e)}")
-            return {
-                "acceptor_id": acceptor_id,
-                "success": False,
-                "error": str(e)
-            }
-    
-    async def accept(self, proposal_id: str, tid: int) -> bool:
-        """
-        Executa a fase de accept do algoritmo Paxos.
+        # Verifica se a requisição contém os campos necessários
+        required_fields = ["clientId", "timestamp", "operation", "resource"]
+        missing_fields = [field for field in required_fields if field not in client_request]
         
-        Args:
-            proposal_id: ID da proposta
-            tid: TID a ser usado na fase de accept (pode ser diferente do original)
+        if missing_fields:
+            logger.error(f"Requisição de cliente rejeitada: campos obrigatórios ausentes: {missing_fields}")
+            return {"status": "rejected", "reason": f"Missing required fields: {missing_fields}"}
         
-        Returns:
-            bool: True se a fase accept foi bem-sucedida
-        """
-        # Obtém os dados da proposta
-        proposal = None
-        async with self.proposal_lock:
-            if proposal_id in self.proposals:
-                proposal = self.proposals[proposal_id].copy()
-                self.proposals[proposal_id]["state"] = ProposerState.ACCEPTING
-            else:
-                logger.error(f"Proposta {proposal_id} não encontrada")
-                return False
+        # Gera um ID de instância único para esta proposta utilizando lock
+        async with self.instance_id_lock:
+            instance_id = self.last_instance_id + 1
+            self.last_instance_id = instance_id
         
-        if proposal is None:
-            return False
-        
-        logger.info(f"Iniciando fase ACCEPT para proposta {proposal_id} com TID={tid}")
-        
-        # Dados para a fase ACCEPT
-        accept_data = {
-            "proposal_id": proposal_id,
-            "proposer_id": self.id,
-            "tid": tid,
-            "client_id": proposal["client_id"],
-            "resource_data": proposal["resource_data"],
-            "timestamp": proposal["timestamp"]
+        # Adiciona metadados à proposta
+        proposal = {
+            "instanceId": instance_id,
+            "clientRequest": client_request,
+            "status": "pending",
+            "created_at": time.time(),
+            "attempt": 0  # Inicializa contador de tentativas
         }
         
-        # Para manter o controle de quais acceptors responderam
-        accepted_count = 0
-        rejections_count = 0
+        # Armazena a proposta no cache
+        self.proposals[instance_id] = proposal
         
-        # Envia ACCEPT apenas para os acceptors que enviaram PROMISE
-        accept_tasks = []
+        # Adiciona à fila de processamento
+        await self.pending_queue.put(instance_id)
         
-        for acceptor_id in proposal["promises"]:
-            acceptor_url = self.acceptors.get(acceptor_id)
-            if not acceptor_url:
-                continue
+        client_id = client_request.get("clientId", "unknown")
+        logger.info(f"Proposta do cliente {client_id} adicionada à fila "
+                    f"com instanceId {instance_id}")
+        
+        if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
+            logger.debug(f"Detalhes da proposta {instance_id}: {client_request}")
+        
+        return {"status": "accepted", "instanceId": instance_id}
+    
+    async def _proposal_executor(self):
+        """Loop de processamento de propostas pendentes."""
+        logger.info("Iniciando executor de propostas")
+        
+        while True:
+            try:
+                # Obtém próxima proposta da fila
+                instance_id = await self.pending_queue.get()
+                proposal = self.proposals.get(instance_id)
                 
-            accept_url = f"{acceptor_url}/accept"
-            
-            task = asyncio.create_task(
-                self._send_accept(acceptor_id, accept_url, accept_data)
-            )
-            accept_tasks.append(task)
-        
-        # Aguarda as respostas dos acceptors
-        for task in asyncio.as_completed(accept_tasks):
-            result = await task
-            acceptor_id = result.get("acceptor_id")
-            success = result.get("success", False)
-            
-            if success:
-                # Recebeu um ACCEPTED
-                accepted_count += 1
-            else:
-                # Recebeu um NOT_ACCEPTED
-                rejections_count += 1
+                if not proposal:
+                    logger.warning(f"Proposta com instanceId {instance_id} não encontrada")
+                    self.pending_queue.task_done()
+                    continue
                 
-                # Atualiza o maior TID visto
-                reject_tid = result.get("tid")
-                if reject_tid:
-                    await self.update_tid(reject_tid)
-        
-        # Determina se a fase ACCEPT foi bem-sucedida
-        # (precisa de maioria, ou seja, mais da metade dos acceptors)
-        majority = len(self.acceptors) // 2 + 1
-        success = accepted_count >= majority
-        
-        # Atualiza o estado da proposta
-        async with self.proposal_lock:
-            if proposal_id in self.proposals:
-                if success:
-                    self.proposals[proposal_id]["state"] = ProposerState.COMMITTED
+                logger.info(f"Processando proposta {instance_id}")
+                proposal["status"] = "processing"
+                
+                # Garante que o campo "attempt" existe
+                if "attempt" not in proposal:
+                    proposal["attempt"] = 0
+                
+                # Se somos o líder, podemos pular a fase Prepare (otimização do Multi-Paxos)
+                if self.is_leader and instance_id > 1:  # Pula fase Prepare para instâncias após a primeira
+                    logger.info(f"Líder otimizando protocolo para instanceId {instance_id}, pulando fase Prepare")
+                    accepted = await self._run_accept_phase(instance_id, proposal)
                 else:
-                    self.proposals[proposal_id]["state"] = ProposerState.REJECTED
+                    # Executar protocolo Paxos completo
+                    accepted = await self._run_paxos(instance_id, proposal)
+                
+                if accepted:
+                    # Na Parte 1, simula acesso ao recurso
+                    if not USE_CLUSTER_STORE:
+                        await self._simulate_resource_access()
+                        # Notifica cliente via learner
+                        await self._notify_client_via_learner(instance_id, proposal, "COMMITTED")
+                        proposal["status"] = "completed"
+                        logger.info(f"Proposta {instance_id} concluída com sucesso (simulação)")
+                    else:
+                        # Na Parte 2, envia ao Cluster Store via learner
+                        success = await self._access_cluster_store(instance_id, proposal)
+                        
+                        if success:
+                            proposal["status"] = "completed"
+                            logger.info(f"Proposta {instance_id} concluída com sucesso (acesso real)")
+                        else:
+                            proposal["status"] = "failed"
+                            logger.warning(f"Proposta {instance_id} falhou no acesso ao Cluster Store")
+                else:
+                    proposal["status"] = "failed"
+                    logger.warning(f"Proposta {instance_id} falhou no consenso Paxos")
+                    
+                    # Se ainda não excedeu o limite de tentativas, coloca de volta na fila com atraso
+                    if proposal["attempt"] < 3:
+                        proposal["attempt"] += 1
+                        logger.info(f"Programando nova tentativa para proposta {instance_id} (tentativa {proposal['attempt']}/3)")
+                        # Usa backoff exponencial com jitter entre tentativas
+                        delay = (2 ** proposal["attempt"]) * (0.8 + 0.4 * random.random())  # Base * (0.8-1.2 jitter)
+                        logger.info(f"Aguardando {delay:.2f}s antes da nova tentativa")
+                        await asyncio.sleep(delay)
+                        # Atualiza status e coloca de volta na fila
+                        proposal["status"] = "pending"
+                        await self.pending_queue.put(instance_id)
+                    else:
+                        # Notifica cliente sobre falha definitiva
+                        logger.error(f"Proposta {instance_id} falhou após todas as tentativas")
+                        await self._notify_client_via_learner(instance_id, proposal, "NOT_COMMITTED")
+                
+                # Marca como processada
+                self.pending_queue.task_done()
+                
+                # Limpa propostas antigas (mais de 1 hora)
+                self._cleanup_old_proposals()
+                
+            except asyncio.CancelledError:
+                logger.info("Executor de propostas cancelado")
+                break
+            except Exception as e:
+                logger.error(f"Erro no executor de propostas: {e}", exc_info=True)
+                await asyncio.sleep(1)  # Evita consumo excessivo de CPU em caso de erros
+    
+    async def _run_paxos(self, instance_id: int, proposal: Dict[str, Any]) -> bool:
+        """
+        Executa o protocolo Paxos completo (fases Prepare e Accept).
         
-        # Notifica os learners sobre o resultado
+        Args:
+            instance_id: ID da instância Paxos
+            proposal: Dados da proposta
+        
+        Returns:
+            bool: True se o consenso foi alcançado, False caso contrário
+        """
+        # Verifica se a proposta existe (segurança extra)
+        if not proposal:
+            logger.error(f"Tentativa de executar Paxos com proposta inexistente: {instance_id}")
+            return False
+            
+        # Garante que o campo "attempt" existe
+        if "attempt" not in proposal:
+            proposal["attempt"] = 0
+            
+        # Tenta até 3 vezes com números de proposta diferentes
+        for attempt in range(3):
+            try:
+                async with self.proposal_counter_lock:
+                    # Incrementa o contador de propostas
+                    self.proposal_counter += 1
+                    # Gera número de proposta único (contador << 8 | ID)
+                    proposal_number = (self.proposal_counter << 8) | self.node_id
+                
+                logger.info(f"Tentativa {attempt+1} para instância {instance_id} com proposal_number {proposal_number}")
+                
+                # Fase Prepare
+                prepare_result = await self._run_prepare_phase(instance_id, proposal_number, proposal)
+                
+                if not prepare_result.get("success", False):
+                    logger.warning(f"Fase Prepare falhou para instância {instance_id}, tentativa {attempt+1}")
+                    await asyncio.sleep(0.5 * (attempt + 1))  # Backoff exponencial simples
+                    continue
+                
+                # Fase Accept (usando valor aceito anteriormente se necessário)
+                highest_value = prepare_result.get("highest_value")
+                success = await self._run_accept_phase(instance_id, proposal, 
+                                                      proposal_number=proposal_number,
+                                                      value_override=highest_value)
+                
+                if success:
+                    return True
+                
+                logger.warning(f"Fase Accept falhou para instância {instance_id}, tentativa {attempt+1}")
+                await asyncio.sleep(0.5 * (attempt + 1))
+                
+            except Exception as e:
+                logger.error(f"Erro durante execução do Paxos para instância {instance_id}: {e}", exc_info=True)
+                await asyncio.sleep(0.5 * (attempt + 1))
+        
+        # Após 3 tentativas sem sucesso
+        proposal["attempt"] += 1
+        logger.warning(f"Paxos falhou após 3 tentativas para instância {instance_id}")
+        
+        return False
+    
+    async def _run_prepare_phase(self, instance_id: int, proposal_number: int, 
+                                proposal: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Executa a fase Prepare do Paxos.
+        
+        Args:
+            instance_id: ID da instância
+            proposal_number: Número da proposta
+            proposal: Dados da proposta
+        
+        Returns:
+            Dict[str, Any]: Resultado da fase Prepare
+            {
+                "success": bool,  # True se recebeu maioria de promises
+                "highest_value": Optional[Dict],  # Valor com maior número de proposta (se houver)
+                "promises": int,  # Número de promises recebidas
+                "highest_proposal": int  # Maior número de proposta recebido
+            }
+        """
+        logger.info(f"Iniciando fase Prepare para instância {instance_id} com número {proposal_number}")
+        
+        # Verifica se temos acceptors configurados
+        if not self.acceptors:
+            logger.error("Nenhum acceptor configurado para fase Prepare")
+            return {"success": False, "promises": 0, "highest_proposal": -1, "highest_value": None}
+        
+        # Prepara mensagem para enviar aos acceptors
+        client_request = proposal.get("clientRequest", {})
+        prepare_message = {
+            "type": "PREPARE",
+            "proposalNumber": proposal_number,
+            "instanceId": instance_id,
+            "proposerId": self.node_id,
+            "clientRequest": client_request
+        }
+        
+        if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
+            logger.debug(f"Prepare message: {prepare_message}")
+        
+        # Envia para todos os acceptors em paralelo
+        promises = []
+        highest_accepted_proposal = -1
+        highest_accepted_value = None
+        
+        # Coleta as respostas
+        responses = await self._send_to_acceptors("/prepare", prepare_message)
+        
+        # Analisa as respostas
+        for response in responses:
+            if response and response.get("accepted") == True:
+                promises.append(response)
+                
+                # Verifica se tem valor aceito anteriormente
+                accepted_proposal = response.get("highestAccepted", -1)
+                if accepted_proposal > highest_accepted_proposal and "acceptedValue" in response:
+                    highest_accepted_proposal = accepted_proposal
+                    highest_accepted_value = response["acceptedValue"]
+        
+        # Verifica se obteve maioria (3 de 5)
+        success = len(promises) >= (len(self.acceptors) // 2 + 1)
+        
         if success:
-            await self._notify_learners(proposal_id, tid, proposal)
-            logger.info(f"Fase ACCEPT bem-sucedida para proposta {proposal_id}: {accepted_count} accepted, {rejections_count} rejections")
+            logger.info(f"Fase Prepare bem-sucedida: {len(promises)}/{len(self.acceptors)} promises recebidas")
         else:
-            logger.warning(f"Fase ACCEPT rejeitada para proposta {proposal_id}: {accepted_count} accepted, {rejections_count} rejections")
+            logger.warning(f"Fase Prepare falhou: apenas {len(promises)}/{len(self.acceptors)} promises recebidas")
+        
+        return {
+            "success": success,
+            "highest_value": highest_accepted_value,
+            "promises": len(promises),
+            "highest_proposal": highest_accepted_proposal
+        }
+    
+    async def _run_accept_phase(self, instance_id: int, proposal: Dict[str, Any], 
+                               proposal_number: Optional[int] = None,
+                               value_override: Optional[Dict[str, Any]] = None) -> bool:
+        """
+        Executa a fase Accept do Paxos.
+        
+        Args:
+            instance_id: ID da instância
+            proposal: Dados da proposta
+            proposal_number: Número da proposta (se None, gera um novo)
+            value_override: Valor a usar em vez do original (para valores previamente aceitos)
+        
+        Returns:
+            bool: True se maioria aceitou, False caso contrário
+        """
+        # Verifica se temos acceptors configurados
+        if not self.acceptors:
+            logger.error("Nenhum acceptor configurado para fase Accept")
+            return False
+            
+        # Se não foi fornecido proposal_number, gera um novo
+        if proposal_number is None:
+            async with self.proposal_counter_lock:
+                self.proposal_counter += 1
+                proposal_number = (self.proposal_counter << 8) | self.node_id
+        
+        # Determina o valor a propor - garante que client_request existe
+        client_request = proposal.get("clientRequest", {})
+        value = value_override if value_override is not None else client_request
+        
+        logger.info(f"Iniciando fase Accept para instância {instance_id} com número {proposal_number}")
+        
+        # Prepara mensagem para enviar aos acceptors
+        accept_message = {
+            "type": "ACCEPT",
+            "proposalNumber": proposal_number,
+            "instanceId": instance_id,
+            "proposerId": self.node_id,
+            "value": value
+        }
+        
+        if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
+            logger.debug(f"Accept message: {accept_message}")
+        
+        # Envia para todos os acceptors em paralelo
+        responses = await self._send_to_acceptors("/accept", accept_message)
+        
+        # Conta quantos aceitaram
+        accepted_count = sum(1 for resp in responses if resp and resp.get("accepted") == True)
+        
+        # Verifica se obteve maioria (mais da metade)
+        success = accepted_count >= (len(self.acceptors) // 2 + 1)
+        
+        if success:
+            logger.info(f"Fase Accept bem-sucedida: {accepted_count}/{len(self.acceptors)} aceitaram")
+        else:
+            logger.warning(f"Fase Accept falhou: apenas {accepted_count}/{len(self.acceptors)} aceitaram")
         
         return success
     
-    async def _send_accept(self, acceptor_id: str, url: str, data: Dict) -> Dict:
+    async def _send_to_acceptors(self, endpoint: str, payload: Dict[str, Any]) -> List[Optional[Dict[str, Any]]]:
         """
-        Envia uma mensagem ACCEPT para um acceptor específico.
+        Envia requisições para todos os acceptors em paralelo.
         
         Args:
-            acceptor_id: ID do acceptor
-            url: URL do endpoint accept do acceptor
-            data: Dados da proposta
+            endpoint: Endpoint a ser chamado (ex: "/prepare", "/accept")
+            payload: Dados a serem enviados
         
         Returns:
-            Dict: Resposta do acceptor
+            List[Optional[Dict[str, Any]]]: Lista de respostas (None para falhas)
         """
-        try:
-            response = await http_request("POST", url, data=data)
-            response["acceptor_id"] = acceptor_id
-            return response
-        except Exception as e:
-            logger.error(f"Erro ao enviar ACCEPT para acceptor {acceptor_id}: {str(e)}")
-            return {
-                "acceptor_id": acceptor_id,
-                "success": False,
-                "error": str(e)
-            }
-    
-    async def _notify_learners(self, proposal_id: str, tid: int, proposal: Dict) -> None:
-        """
-        Notifica os learners sobre uma proposta aceita.
-        
-        Args:
-            proposal_id: ID da proposta
-            tid: TID da proposta
-            proposal: Dados completos da proposta
-        """
-        # Dados para os learners
-        learn_data = {
-            "proposal_id": proposal_id,
-            "proposer_id": self.id,
-            "tid": tid,
-            "client_id": proposal["client_id"],
-            "resource_data": proposal["resource_data"],
-            "timestamp": proposal["timestamp"]
-        }
-        
-        # Envia para todos os learners
-        learn_tasks = []
-        
-        for learner_id, url in self.learners.items():
-            learn_url = f"{url}/learn"
-            
-            task = asyncio.create_task(
-                http_request("POST", learn_url, data=learn_data)
-            )
-            learn_tasks.append(task)
-        
-        # Aguarda as respostas (mas não precisamos fazer nada com elas)
-        await asyncio.gather(*learn_tasks, return_exceptions=True)
-        
-        logger.debug(f"Learners notificados sobre proposta {proposal_id}")
-    
-    async def get_store_status(self) -> Dict:
-        """
-        Obtém o status de todos os stores.
-        
-        Returns:
-            Dict: Status de cada store
-        """
-        status = {}
+        # Cria tasks para todas as requisições em paralelo
         tasks = []
+        for acceptor in self.acceptors:
+            if not acceptor:  # Ignora acceptors com endereço vazio
+                continue
+                
+            url = f"http://{acceptor}{endpoint}"
+            cb = self.circuit_breakers[acceptor]
+            
+            # Adiciona a task com circuit breaker e retentativas
+            tasks.append(self._send_with_retry(url, payload, circuit_breaker=cb))
         
-        for store_id, url in self.stores.items():
-            status_url = f"{url}/status"
-            task = asyncio.create_task(
-                self._get_store_status(store_id, status_url)
-            )
-            tasks.append(task)
-        
+        # Executa todas as requisições em paralelo
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        for result in results:
-            if isinstance(result, Exception):
-                continue
-            
-            store_id = result.get("store_id")
-            if store_id:
-                status[store_id] = result
+        # Converte exceções para None
+        processed_results = []
+        for res in results:
+            if isinstance(res, Exception):
+                processed_results.append(None)
+                if DEBUG:
+                    logger.debug(f"Exception ao enviar para acceptor: {str(res)}")
+            else:
+                processed_results.append(res)
         
-        return status
+        return processed_results
     
-    async def _get_store_status(self, store_id: str, url: str) -> Dict:
+    async def _send_with_retry(self, url: str, payload: Dict[str, Any], 
+                             circuit_breaker: Optional[CircuitBreaker] = None,
+                             max_retries: int = 3) -> Optional[Dict[str, Any]]:
         """
-        Obtém o status de um store específico.
+        Envia requisição HTTP com retentativas e circuit breaker.
         
         Args:
-            store_id: ID do store
-            url: URL do endpoint status do store
+            url: URL de destino
+            payload: Dados a serem enviados
+            circuit_breaker: CircuitBreaker para o destino
+            max_retries: Número máximo de tentativas
         
         Returns:
-            Dict: Status do store
+            Optional[Dict[str, Any]]: Resposta ou None em caso de falha
         """
-        try:
-            response = await http_request("GET", url)
-            response["store_id"] = store_id
-            return response
-        except Exception as e:
-            logger.error(f"Erro ao obter status do store {store_id}: {str(e)}")
-            return {
-                "store_id": store_id,
-                "status": "error",
-                "error": str(e)
-            }
-    
-    async def propose(self, client_id: str, resource_data: Dict) -> Dict:
-        """
-        Inicia uma nova proposta para o recurso R.
-        
-        Args:
-            client_id: ID do cliente que fez a solicitação
-            resource_data: Dados do recurso a serem propostos
-        
-        Returns:
-            Dict: Resultado da proposta
-        """
-        # Se não somos o líder, repassamos a proposta para o líder atual
-        if not self.is_leader and self.current_leader:
-            logger.info(f"Não somos o líder. Repassando proposta para {self.current_leader}")
+        # Validação de entrada
+        if not url:
+            logger.warning("Tentativa de enviar requisição para URL vazia")
+            return None
             
-            # Obter a URL do líder
-            leader_url = None
-            for prop_id, url in self.other_proposers.items():
-                if prop_id == self.current_leader:
-                    leader_url = url
-                    break
-            
-            if leader_url:
-                # Encaminhar a proposta para o líder
-                forward_url = f"{leader_url}/propose"
-                forward_data = {
-                    "client_id": client_id,
-                    "resource_data": resource_data
-                }
+        # Verifica se o circuit breaker está aberto
+        if circuit_breaker and not circuit_breaker.allow_request():
+            logger.warning(f"Circuit breaker aberto para {url}, ignorando requisição")
+            return None
+        
+        # Tenta enviar a requisição com retentativas
+        for attempt in range(max_retries):
+            try:
+                # Adiciona jitter ao timeout (480-520ms)
+                timeout = 0.5 + (random.random() * 0.04 - 0.02)
                 
-                try:
-                    return await http_request("POST", forward_url, data=forward_data)
-                except Exception as e:
-                    logger.error(f"Erro ao encaminhar proposta para o líder: {str(e)}")
-                    return {
-                        "success": False,
-                        "error": f"Falha ao encaminhar para o líder: {str(e)}",
-                        "leader": self.current_leader
-                    }
-            
-            return {
-                "success": False,
-                "error": "Líder desconhecido",
-                "leader": self.current_leader
-            }
+                # Faz a requisição com timeout
+                start_time = time.time()
+                response = await self.http_client.post(url, json=payload, timeout=timeout)
+                elapsed = time.time() - start_time
+                
+                # Registra sucesso no circuit breaker
+                if circuit_breaker:
+                    await circuit_breaker.record_success()
+                
+                if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
+                    logger.debug(f"Requisição para {url} concluída em {elapsed:.3f}s")
+                
+                return response
+                
+            except Exception as e:
+                # Registra falha no circuit breaker
+                if circuit_breaker:
+                    await circuit_breaker.record_failure()
+                
+                logger.warning(f"Falha ao chamar {url}, tentativa {attempt+1}/{max_retries}: {e}")
+                
+                # Calcula tempo de espera com backoff exponencial e jitter
+                backoff_time = calculate_backoff(attempt)
+                
+                if attempt < max_retries - 1:
+                    logger.info(f"Aguardando {backoff_time:.2f}s antes da próxima tentativa")
+                    await asyncio.sleep(backoff_time)
         
-        # Gera um ID único para a proposta
-        proposal_id = generate_id()
-        timestamp = current_timestamp()
-        
-        logger.info(f"Iniciando nova proposta {proposal_id} do cliente {client_id}")
-        
-        # Executa a fase PREPARE
-        prepare_success, new_tid = await self.prepare(
-            proposal_id, client_id, resource_data, timestamp
-        )
-        
-        if not prepare_success:
-            logger.warning(f"Fase PREPARE falhou para proposta {proposal_id}")
-            return {
-                "success": False,
-                "proposal_id": proposal_id,
-                "error": "Fase PREPARE falhou"
-            }
-        
-        # Executa a fase ACCEPT
-        accept_success = await self.accept(proposal_id, new_tid)
-        
-        if not accept_success:
-            logger.warning(f"Fase ACCEPT falhou para proposta {proposal_id}")
-            return {
-                "success": False,
-                "proposal_id": proposal_id,
-                "error": "Fase ACCEPT falhou"
-            }
-        
-        # Se chegamos aqui, a proposta foi aceita
-        logger.info(f"Proposta {proposal_id} aceita com sucesso")
-        
-        return {
-            "success": True,
-            "proposal_id": proposal_id,
-            "tid": new_tid
-        }
+        return None
     
-    def get_proposal_status(self, proposal_id: str) -> Dict:
+    async def _simulate_resource_access(self):
         """
-        Obtém o status de uma proposta específica.
+        Simula o acesso ao recurso (apenas na Parte 1).
+        Espera entre 0.2 e 1.0 segundos.
+        """
+        delay = 0.2 + random.random() * 0.8
+        logger.info(f"Simulando acesso ao recurso por {delay:.3f} segundos")
+        await asyncio.sleep(delay)
+    
+    async def _access_cluster_store(self, instance_id: int, proposal: Dict[str, Any]) -> bool:
+        """
+        Acessa o Cluster Store para escrita real (Parte 2).
         
         Args:
-            proposal_id: ID da proposta
+            instance_id: ID da instância
+            proposal: Dados da proposta
         
         Returns:
-            Dict: Status da proposta
+            bool: True se acesso bem-sucedido, False caso contrário
         """
-        if proposal_id in self.proposals:
-            proposal = self.proposals[proposal_id]
-            return {
-                "proposal_id": proposal_id,
-                "state": proposal["state"],
-                "client_id": proposal["client_id"],
-                "tid": proposal["tid"],
-                "timestamp": proposal["timestamp"],
-                "promises_count": len(proposal.get("promises", {})),
-                "rejections_count": len(proposal.get("rejections", {}))
-            }
-        else:
-            return {
-                "proposal_id": proposal_id,
-                "error": "Proposta não encontrada"
-            }
+        # Seleciona um nó do Cluster Store via round-robin
+        if not self.stores:
+            logger.error("Nenhum nó do Cluster Store configurado")
+            return False
+        
+        # Seleciona próximo nó via round-robin
+        self.store_index = (self.store_index + 1) % len(self.stores)
+        selected_store = self.stores[self.store_index]
+        
+        logger.info(f"Acessando Cluster Store {selected_store} para instância {instance_id}")
+        
+        try:
+            # Em vez de acessar diretamente, delegamos ao Learner
+            # que implementa o protocolo ROWA para replicação
+            await self._notify_learner_for_cluster_access(instance_id, proposal, selected_store)
+            return True
+        except Exception as e:
+            logger.error(f"Erro ao acessar Cluster Store: {e}", exc_info=True)
+            return False
     
-    def get_all_proposals(self) -> List[Dict]:
+    async def _notify_client_via_learner(self, instance_id: int, proposal: Dict[str, Any], status: str):
         """
-        Obtém o status de todas as propostas.
+        Notifica o cliente via Learner sobre o resultado da operação.
         
-        Returns:
-            List[Dict]: Lista com o status de todas as propostas
+        Args:
+            instance_id: ID da instância
+            proposal: Dados da proposta
+            status: Status da operação (COMMITTED/NOT_COMMITTED)
         """
-        result = []
-        for proposal_id, proposal in self.proposals.items():
-            result.append({
-                "proposal_id": proposal_id,
-                "state": proposal["state"],
-                "client_id": proposal["client_id"],
-                "tid": proposal["tid"],
-                "timestamp": proposal["timestamp"],
-                "promises_count": len(proposal.get("promises", {})),
-                "rejections_count": len(proposal.get("rejections", {}))
-            })
-        return result
-    
-    def get_status(self) -> Dict:
-        """
-        Obtém o status completo do proposer.
+        # Extrair clientId de forma segura
+        client_request = proposal.get("clientRequest", {})
+        client_id = client_request.get("clientId", "unknown")
         
-        Returns:
-            Dict: Status do proposer
-        """
-        return {
-            "id": self.id,
-            "is_leader": self.is_leader,
-            "current_leader": self.current_leader,
-            "tid_counter": self.tid_counter.get_current(),
-            "acceptors_count": len(self.acceptors),
-            "learners_count": len(self.learners),
-            "stores_count": len(self.stores),
-            "active_proposals": len([p for p in self.proposals.values() 
-                                   if p["state"] not in (ProposerState.COMMITTED, ProposerState.REJECTED, ProposerState.FAILED)])
+        # Verifica se temos learners configurados
+        if not self.learners:
+            logger.error(f"Nenhum learner configurado para notificar cliente {client_id}")
+            return
+        
+        # Determina qual learner deve notificar este cliente
+        # Usa hash do clientId para distribuição consistente
+        learner_index = hash(client_id) % len(self.learners)
+        learner = self.learners[learner_index]
+        
+        logger.info(f"Notificando cliente {client_id} via learner {learner} com status {status}")
+        
+        notification = {
+            "type": "NOTIFY_CLIENT",
+            "instanceId": instance_id,
+            "clientId": client_id,
+            "status": status,
+            "timestamp": current_timestamp(),
+            "resource": client_request.get("resource", "unknown")
         }
+        
+        try:
+            url = f"http://{learner}/notify-client"
+            response = await self.http_client.post(url, json=notification, timeout=1.0)
+            
+            if DEBUG and DEBUG_LEVEL in ("advanced", "trace"):
+                logger.debug(f"Resposta da notificação ao cliente: {response}")
+                
+        except Exception as e:
+            logger.error(f"Erro ao notificar cliente via learner: {e}")
+    
+    async def _notify_learner_for_cluster_access(self, instance_id: int, proposal: Dict[str, Any], selected_store: str):
+        """
+        Notifica o Learner para acessar o Cluster Store.
+        
+        Args:
+            instance_id: ID da instância
+            proposal: Dados da proposta
+            selected_store: Nó do Cluster Store selecionado
+        """
+        # Extrair dados da proposta de forma segura
+        client_request = proposal.get("clientRequest", {})
+        client_id = client_request.get("clientId", "unknown")
+        
+        # Verifica se temos learners configurados
+        if not self.learners:
+            logger.error(f"Nenhum learner configurado para acessar o Cluster Store")
+            return
+        
+        # Determina qual learner deve processar esta operação
+        # Usa hash do instanceId para distribuição equilibrada
+        learner_index = hash(str(instance_id)) % len(self.learners)
+        learner = self.learners[learner_index]
+        
+        logger.info(f"Delegando acesso ao Cluster Store {selected_store} para learner {learner}")
+        
+        access_request = {
+            "type": "CLUSTER_ACCESS",
+            "instanceId": instance_id,
+            "clientId": client_id,
+            "operation": client_request.get("operation", "WRITE"),
+            "resource": client_request.get("resource", "R"),
+            "data": client_request.get("data", ""),
+            "timestamp": current_timestamp(),
+            "selectedStore": selected_store
+        }
+        
+        try:
+            url = f"http://{learner}/cluster-access"
+            response = await self.http_client.post(url, json=access_request, timeout=2.0)
+            
+            # Verifica resultado
+            if response and response.get("status") == "success":
+                logger.info(f"Acesso ao Cluster Store bem-sucedido via learner {learner}")
+                return True
+            else:
+                message = response.get("message", "Sem detalhes") if response else "Sem resposta"
+                logger.warning(f"Acesso ao Cluster Store falhou: {message}")
+                return False
+        except Exception as e:
+            logger.error(f"Erro ao delegar acesso ao Cluster Store para learner: {e}")
+            return False
+    
+    def _cleanup_old_proposals(self, max_age: float = 3600):
+        """
+        Remove propostas antigas do cache.
+        
+        Args:
+            max_age: Idade máxima em segundos
+        """
+        now = time.time()
+        to_remove = []
+        
+        for instance_id, proposal in self.proposals.items():
+            # Extrai created_at de forma segura
+            created_at = proposal.get("created_at", now)
+            age = now - created_at
+            if age > max_age:
+                to_remove.append(instance_id)
+        
+        # Remove as propostas antigas
+        for instance_id in to_remove:
+            del self.proposals[instance_id]
+        
+        if to_remove and DEBUG:
+            logger.debug(f"Removidas {len(to_remove)} propostas antigas do cache")

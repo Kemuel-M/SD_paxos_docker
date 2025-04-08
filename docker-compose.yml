@@ -1,330 +1,336 @@
 services:
-  # Proposers (Cluster Sync)
-  proposer1:
+  # Proposers
+  proposer-1:
     build:
       context: .
-      dockerfile: proposer/Dockerfile
+      dockerfile: ./proposer/Dockerfile
     environment:
-      - DEBUG=${DEBUG:-false}
-      - PROPOSER_ID=proposer_1
-      - ACCEPTORS=http://acceptor1:8100,http://acceptor2:8100,http://acceptor3:8100,http://acceptor4:8100,http://acceptor5:8100
-      - LEARNERS=http://learner1:8200,http://learner2:8200
-      - STORES=http://store1:8300,http://store2:8300,http://store3:8300
-      - PROPOSERS=http://proposer1:8000,http://proposer2:8000,http://proposer3:8000,http://proposer4:8000,http://proposer5:8000
-    ports:
-      - "8001:8000"
+      - NODE_ID=1
+      - DEBUG=true
+      - DEBUG_LEVEL=basic
     volumes:
-      - ./logs:/app/logs
+      - ./data/proposer-1:/data
+    ports:
+      - "8001:8080"
     networks:
       - paxos-network
 
-  proposer2:
+  proposer-2:
     build:
       context: .
-      dockerfile: proposer/Dockerfile
+      dockerfile: ./proposer/Dockerfile
     environment:
-      - DEBUG=${DEBUG:-false}
-      - PROPOSER_ID=proposer_2
-      - ACCEPTORS=http://acceptor1:8100,http://acceptor2:8100,http://acceptor3:8100,http://acceptor4:8100,http://acceptor5:8100
-      - LEARNERS=http://learner1:8200,http://learner2:8200
-      - STORES=http://store1:8300,http://store2:8300,http://store3:8300
-      - PROPOSERS=http://proposer1:8000,http://proposer2:8000,http://proposer3:8000,http://proposer4:8000,http://proposer5:8000
-    ports:
-      - "8002:8000"
+      - NODE_ID=2
+      - DEBUG=true
+      - DEBUG_LEVEL=basic
     volumes:
-      - ./logs:/app/logs
+      - ./data/proposer-2:/data
+    ports:
+      - "8002:8080"
     networks:
       - paxos-network
 
-  proposer3:
+  proposer-3:
     build:
       context: .
-      dockerfile: proposer/Dockerfile
+      dockerfile: ./proposer/Dockerfile
     environment:
-      - DEBUG=${DEBUG:-false}
-      - PROPOSER_ID=proposer_3
-      - ACCEPTORS=http://acceptor1:8100,http://acceptor2:8100,http://acceptor3:8100,http://acceptor4:8100,http://acceptor5:8100
-      - LEARNERS=http://learner1:8200,http://learner2:8200
-      - STORES=http://store1:8300,http://store2:8300,http://store3:8300
-      - PROPOSERS=http://proposer1:8000,http://proposer2:8000,http://proposer3:8000,http://proposer4:8000,http://proposer5:8000
-    ports:
-      - "8003:8000"
+      - NODE_ID=3
+      - DEBUG=true
+      - DEBUG_LEVEL=basic
     volumes:
-      - ./logs:/app/logs
+      - ./data/proposer-3:/data
+    ports:
+      - "8003:8080"
     networks:
       - paxos-network
 
-  proposer4:
+  proposer-4:
     build:
       context: .
-      dockerfile: proposer/Dockerfile
+      dockerfile: ./proposer/Dockerfile
     environment:
-      - DEBUG=${DEBUG:-false}
-      - PROPOSER_ID=proposer_4
-      - ACCEPTORS=http://acceptor1:8100,http://acceptor2:8100,http://acceptor3:8100,http://acceptor4:8100,http://acceptor5:8100
-      - LEARNERS=http://learner1:8200,http://learner2:8200
-      - STORES=http://store1:8300,http://store2:8300,http://store3:8300
-      - PROPOSERS=http://proposer1:8000,http://proposer2:8000,http://proposer3:8000,http://proposer4:8000,http://proposer5:8000
-    ports:
-      - "8004:8000"
+      - NODE_ID=4
+      - DEBUG=true
+      - DEBUG_LEVEL=basic
     volumes:
-      - ./logs:/app/logs
+      - ./data/proposer-4:/data
+    ports:
+      - "8004:8080"
     networks:
       - paxos-network
 
-  proposer5:
+  proposer-5:
     build:
       context: .
-      dockerfile: proposer/Dockerfile
+      dockerfile: ./proposer/Dockerfile
     environment:
-      - DEBUG=${DEBUG:-false}
-      - PROPOSER_ID=proposer_5
-      - ACCEPTORS=http://acceptor1:8100,http://acceptor2:8100,http://acceptor3:8100,http://acceptor4:8100,http://acceptor5:8100
-      - LEARNERS=http://learner1:8200,http://learner2:8200
-      - STORES=http://store1:8300,http://store2:8300,http://store3:8300
-      - PROPOSERS=http://proposer1:8000,http://proposer2:8000,http://proposer3:8000,http://proposer4:8000,http://proposer5:8000
-    ports:
-      - "8005:8000"
+      - NODE_ID=5
+      - DEBUG=true
+      - DEBUG_LEVEL=basic
     volumes:
-      - ./logs:/app/logs
+      - ./data/proposer-5:/data
+    ports:
+      - "8005:8080"
     networks:
       - paxos-network
 
   # Acceptors
-  acceptor1:
+  acceptor-1:
     build:
       context: .
-      dockerfile: acceptor/Dockerfile
+      dockerfile: ./acceptor/Dockerfile
     environment:
-      - DEBUG=${DEBUG:-false}
-      - ACCEPTOR_ID=acceptor_1
-      - LEARNERS=http://learner1:8200,http://learner2:8200
-    ports:
-      - "8101:8100"
+      - NODE_ID=1
+      - DEBUG=true
+      - DEBUG_LEVEL=basic
     volumes:
-      - ./logs:/app/logs
+      - ./data/acceptor-1:/data
+    ports:
+      - "8101:8080"
     networks:
       - paxos-network
 
-  acceptor2:
+  acceptor-2:
     build:
       context: .
-      dockerfile: acceptor/Dockerfile
+      dockerfile: ./acceptor/Dockerfile
     environment:
-      - DEBUG=${DEBUG:-false}
-      - ACCEPTOR_ID=acceptor_2
-      - LEARNERS=http://learner1:8200,http://learner2:8200
-    ports:
-      - "8102:8100"
+      - NODE_ID=2
+      - DEBUG=true
+      - DEBUG_LEVEL=basic
     volumes:
-      - ./logs:/app/logs
+      - ./data/acceptor-2:/data
+    ports:
+      - "8102:8080"
     networks:
       - paxos-network
 
-  acceptor3:
+  acceptor-3:
     build:
       context: .
-      dockerfile: acceptor/Dockerfile
+      dockerfile: ./acceptor/Dockerfile
     environment:
-      - DEBUG=${DEBUG:-false}
-      - ACCEPTOR_ID=acceptor_3
-      - LEARNERS=http://learner1:8200,http://learner2:8200
-    ports:
-      - "8103:8100"
+      - NODE_ID=3
+      - DEBUG=true
+      - DEBUG_LEVEL=basic
     volumes:
-      - ./logs:/app/logs
+      - ./data/acceptor-3:/data
+    ports:
+      - "8103:8080"
     networks:
       - paxos-network
 
-  acceptor4:
+  acceptor-4:
     build:
       context: .
-      dockerfile: acceptor/Dockerfile
+      dockerfile: ./acceptor/Dockerfile
     environment:
-      - DEBUG=${DEBUG:-false}
-      - ACCEPTOR_ID=acceptor_4
-      - LEARNERS=http://learner1:8200,http://learner2:8200
-    ports:
-      - "8104:8100"
+      - NODE_ID=4
+      - DEBUG=true
+      - DEBUG_LEVEL=basic
     volumes:
-      - ./logs:/app/logs
+      - ./data/acceptor-4:/data
+    ports:
+      - "8104:8080"
     networks:
       - paxos-network
 
-  acceptor5:
+  acceptor-5:
     build:
       context: .
-      dockerfile: acceptor/Dockerfile
+      dockerfile: ./acceptor/Dockerfile
     environment:
-      - DEBUG=${DEBUG:-false}
-      - ACCEPTOR_ID=acceptor_5
-      - LEARNERS=http://learner1:8200,http://learner2:8200
-    ports:
-      - "8105:8100"
+      - NODE_ID=5
+      - DEBUG=true
+      - DEBUG_LEVEL=basic
     volumes:
-      - ./logs:/app/logs
+      - ./data/acceptor-5:/data
+    ports:
+      - "8105:8080"
     networks:
       - paxos-network
 
   # Learners
-  learner1:
+  learner-1:
     build:
       context: .
-      dockerfile: learner/Dockerfile
+      dockerfile: ./learner/Dockerfile
     environment:
-      - DEBUG=${DEBUG:-false}
-      - LEARNER_ID=learner_1
-      - ACCEPTORS=http://acceptor1:8100,http://acceptor2:8100,http://acceptor3:8100,http://acceptor4:8100,http://acceptor5:8100
-      - STORES=http://store1:8300,http://store2:8300,http://store3:8300
-      - CLIENTS=http://client1:8400,http://client2:8400,http://client3:8400,http://client4:8400,http://client5:8400
-    ports:
-      - "8201:8200"
+      - NODE_ID=1
+      - DEBUG=true
+      - DEBUG_LEVEL=basic
+      - USE_CLUSTER_STORE=true
     volumes:
-      - ./logs:/app/logs
+      - ./data/learner-1:/data
+    ports:
+      - "8201:8080"
     networks:
       - paxos-network
 
-  learner2:
+  learner-2:
     build:
       context: .
-      dockerfile: learner/Dockerfile
+      dockerfile: ./learner/Dockerfile
     environment:
-      - DEBUG=${DEBUG:-false}
-      - LEARNER_ID=learner_2
-      - ACCEPTORS=http://acceptor1:8100,http://acceptor2:8100,http://acceptor3:8100,http://acceptor4:8100,http://acceptor5:8100
-      - STORES=http://store1:8300,http://store2:8300,http://store3:8300
-      - CLIENTS=http://client1:8400,http://client2:8400,http://client3:8400,http://client4:8400,http://client5:8400
-    ports:
-      - "8202:8200"
+      - NODE_ID=2
+      - DEBUG=true
+      - DEBUG_LEVEL=basic
+      - USE_CLUSTER_STORE=true
     volumes:
-      - ./logs:/app/logs
+      - ./data/learner-2:/data
+    ports:
+      - "8202:8080"
     networks:
       - paxos-network
 
-  # Cluster Stores
-  store1:
+  # Cluster Store
+  cluster-store-1:
     build:
       context: .
-      dockerfile: cluster_store/Dockerfile
+      dockerfile: ./cluster_store/Dockerfile
     environment:
-      - DEBUG=${DEBUG:-false}
-      - STORE_ID=store_1
-    ports:
-      - "8301:8300"
+      - NODE_ID=1
+      - DEBUG=true
+      - DEBUG_LEVEL=basic
+      - STORES=cluster-store-1:8080,cluster-store-2:8080,cluster-store-3:8080
     volumes:
-      - ./data/store1:/app/data
-      - ./logs:/app/logs
+      - ./data/cluster-store-1:/data
+    ports:
+      - "8301:8080"
     networks:
       - paxos-network
 
-  store2:
+  cluster-store-2:
     build:
       context: .
-      dockerfile: cluster_store/Dockerfile
+      dockerfile: ./cluster_store/Dockerfile
     environment:
-      - DEBUG=${DEBUG:-false}
-      - STORE_ID=store_2
-    ports:
-      - "8302:8300"
+      - NODE_ID=2
+      - DEBUG=true
+      - DEBUG_LEVEL=basic
+      - STORES=cluster-store-1:8080,cluster-store-2:8080,cluster-store-3:8080
     volumes:
-      - ./data/store2:/app/data
-      - ./logs:/app/logs
+      - ./data/cluster-store-2:/data
+    ports:
+      - "8302:8080"
     networks:
       - paxos-network
 
-  store3:
+  cluster-store-3:
     build:
       context: .
-      dockerfile: cluster_store/Dockerfile
+      dockerfile: ./cluster_store/Dockerfile
     environment:
-      - DEBUG=${DEBUG:-false}
-      - STORE_ID=store_3
-    ports:
-      - "8303:8300"
+      - NODE_ID=3
+      - DEBUG=true
+      - DEBUG_LEVEL=basic
+      - STORES=cluster-store-1:8080,cluster-store-2:8080,cluster-store-3:8080
     volumes:
-      - ./data/store3:/app/data
-      - ./logs:/app/logs
+      - ./data/cluster-store-3:/data
+    ports:
+      - "8303:8080"
     networks:
       - paxos-network
 
   # Clients
-  client1:
+  client-1:
     build:
       context: .
-      dockerfile: client/Dockerfile
+      dockerfile: ./client/Dockerfile
     environment:
-      - DEBUG=${DEBUG:-false}
-      - CLIENT_ID=client_1
-      - PROPOSER_URL=http://proposer1:8000
-    ports:
-      - "8401:8400"  # API port
-      - "8501:8500"  # Web UI port
+      - CLIENT_ID=client-1
+      - NODE_ID=1
+      - DEBUG=true
+      - DEBUG_LEVEL=basic
+      - PROPOSER=proposer-1:8080
+      - NUM_OPERATIONS=20
+      - AUTO_START=true
     volumes:
-      - ./logs:/app/logs
+      - ./data/client-1:/data
+    ports:
+      - "8401:8080"
+      - "8501:8081"
     networks:
       - paxos-network
 
-  client2:
+  client-2:
     build:
       context: .
-      dockerfile: client/Dockerfile
+      dockerfile: ./client/Dockerfile
     environment:
-      - DEBUG=${DEBUG:-false}
-      - CLIENT_ID=client_2
-      - PROPOSER_URL=http://proposer2:8000
-    ports:
-      - "8402:8400"  # API port
-      - "8502:8500"  # Web UI port
+      - CLIENT_ID=client-2
+      - NODE_ID=2
+      - DEBUG=true
+      - DEBUG_LEVEL=basic
+      - PROPOSER=proposer-2:8080
+      - NUM_OPERATIONS=20
+      - AUTO_START=true
     volumes:
-      - ./logs:/app/logs
+      - ./data/client-2:/data
+    ports:
+      - "8402:8080"
+      - "8502:8081"
     networks:
       - paxos-network
 
-  client3:
+  client-3:
     build:
       context: .
-      dockerfile: client/Dockerfile
+      dockerfile: ./client/Dockerfile
     environment:
-      - DEBUG=${DEBUG:-false}
-      - CLIENT_ID=client_3
-      - PROPOSER_URL=http://proposer3:8000
-    ports:
-      - "8403:8400"  # API port
-      - "8503:8500"  # Web UI port
+      - CLIENT_ID=client-3
+      - NODE_ID=3
+      - DEBUG=true
+      - DEBUG_LEVEL=basic
+      - PROPOSER=proposer-3:8080
+      - NUM_OPERATIONS=20
+      - AUTO_START=true
     volumes:
-      - ./logs:/app/logs
+      - ./data/client-3:/data
+    ports:
+      - "8403:8080"
+      - "8503:8081"
     networks:
       - paxos-network
 
-  client4:
+  client-4:
     build:
       context: .
-      dockerfile: client/Dockerfile
+      dockerfile: ./client/Dockerfile
     environment:
-      - DEBUG=${DEBUG:-false}
-      - CLIENT_ID=client_4
-      - PROPOSER_URL=http://proposer4:8000
-    ports:
-      - "8404:8400"  # API port
-      - "8504:8500"  # Web UI port
+      - CLIENT_ID=client-4
+      - NODE_ID=4
+      - DEBUG=true
+      - DEBUG_LEVEL=basic
+      - PROPOSER=proposer-4:8080
+      - NUM_OPERATIONS=20
+      - AUTO_START=true
     volumes:
-      - ./logs:/app/logs
+      - ./data/client-4:/data
+    ports:
+      - "8404:8080"
+      - "8504:8081"
     networks:
       - paxos-network
 
-  client5:
+  client-5:
     build:
       context: .
-      dockerfile: client/Dockerfile
+      dockerfile: ./client/Dockerfile
     environment:
-      - DEBUG=${DEBUG:-false}
-      - CLIENT_ID=client_5
-      - PROPOSER_URL=http://proposer5:8000
-    ports:
-      - "8405:8400"  # API port
-      - "8505:8500"  # Web UI port
+      - CLIENT_ID=client-5
+      - NODE_ID=5
+      - DEBUG=true
+      - DEBUG_LEVEL=basic
+      - PROPOSER=proposer-5:8080
+      - NUM_OPERATIONS=20
+      - AUTO_START=true
     volumes:
-      - ./logs:/app/logs
+      - ./data/client-5:/data
+    ports:
+      - "8405:8080"
+      - "8505:8081"
     networks:
       - paxos-network
 

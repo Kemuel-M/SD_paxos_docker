@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cliente Paxos - Recurso</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/css/styles.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Cliente Paxos - {{ client_id }}</h1>
+            <nav>
+                <ul>
+                    <li><a href="/">Dashboard</a></li>
+                    <li><a href="/resources" class="active">Recursos</a></li>
+                    <li><a href="/history">Histórico</a></li>
+                    <li><a href="/logs">Logs</a></li>
+                    <li><a href="/system-logs">Logs do Sistema</a></li>
+                </ul>
+            </nav>
+        </header>
+
+        <main>
+            <section class="resource-detail">
+                <div class="resource-header">
+                    <h2>Recurso R</h2>
+                    <div class="resource-metadata">
+                        <span>Versão: {{ resource.version }}</span>
+                        <span>Última atualização: {{ resource.timestamp }}</span>
+                        <span>Nó: {{ resource.node_id }}</span>
+                    </div>
+                </div>
+
+                <div class="resource-tabs">
+                    <button class="tab-button active" data-tab="view">Visualizar</button>
+                    <button class="tab-button" data-tab="edit">Editar</button>
+                </div>
+
+                <div class="tab-content">
+                    <div id="view" class="tab-pane active">
+                        <div class="resource-content">
+                            <pre>{{ resource.data }}</pre>
+                        </div>
+                    </div>
+                    <div id="edit" class="tab-pane">
+                        <form id="resource-edit-form">
+                            <div class="form-group">
+                                <label for="resource-data">Conteúdo do Recurso:</label>
+                                <textarea id="resource-data" name="data" rows="10">{{ resource.data }}</textarea>
+                            </div>
+                            <div class="form-actions">
+                                <button type="submit" class="button primary">Salvar Alterações</button>
+                                <button type="reset" class="button">Cancelar</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <div id="edit-result" class="hidden">
+                    <h3>Resultado da Operação</h3>
+                    <div id="edit-result-content"></div>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            <p>Cliente Paxos - Sistema de Consenso Distribuído</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', path='/js/main.js') }}"></script>
+</body>
+</html>
