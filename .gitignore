@@ -27,3 +27,6 @@ run-tests-client-old.sh
 # Cluster_Store
 cluster_store/tests/
 scripts/run-tests-cluster-store.sh
+
+
+data/

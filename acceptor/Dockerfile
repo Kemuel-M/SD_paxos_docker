@@ -1,21 +1,16 @@
-# File: acceptor/Dockerfile
-# Container configuration for the Acceptor component
-
 FROM python:3.10-slim
 
 WORKDIR /app
 
 # Install dependencies
-COPY acceptor/requirements.txt .
+COPY acceptor/requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy common modules
-COPY common /app/common
+# Copy code
+COPY acceptor/ /app/acceptor/
+COPY common/ /app/common/
 
-# Copy acceptor code
-COPY acceptor /app/acceptor
-
-# Create directories for persistent data and logs
+# Create persistent data and logs directories
 RUN mkdir -p /data /data/logs
 VOLUME /data
 
@@ -32,7 +27,7 @@ ENV DATA_DIR=/data
 # Expose port
 EXPOSE 8080
 
-# Working directory for execution
+# Set working directory
 WORKDIR /app/acceptor
 
 # Command to start the application

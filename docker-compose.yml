@@ -1,9 +1,9 @@
-version: '3.8'
-
 services:
   # Proposers
   proposer-1:
-    build: ./proposer
+    build:
+      context: .
+      dockerfile: ./proposer/Dockerfile
     environment:
       - NODE_ID=1
       - DEBUG=true
@@ -16,7 +16,9 @@ services:
       - paxos-network
 
   proposer-2:
-    build: ./proposer
+    build:
+      context: .
+      dockerfile: ./proposer/Dockerfile
     environment:
       - NODE_ID=2
       - DEBUG=true
@@ -29,7 +31,9 @@ services:
       - paxos-network
 
   proposer-3:
-    build: ./proposer
+    build:
+      context: .
+      dockerfile: ./proposer/Dockerfile
     environment:
       - NODE_ID=3
       - DEBUG=true
@@ -42,7 +46,9 @@ services:
       - paxos-network
 
   proposer-4:
-    build: ./proposer
+    build:
+      context: .
+      dockerfile: ./proposer/Dockerfile
     environment:
       - NODE_ID=4
       - DEBUG=true
@@ -55,7 +61,9 @@ services:
       - paxos-network
 
   proposer-5:
-    build: ./proposer
+    build:
+      context: .
+      dockerfile: ./proposer/Dockerfile
     environment:
       - NODE_ID=5
       - DEBUG=true
@@ -69,7 +77,9 @@ services:
 
   # Acceptors
   acceptor-1:
-    build: ./acceptor
+    build:
+      context: .
+      dockerfile: ./acceptor/Dockerfile
     environment:
       - NODE_ID=1
       - DEBUG=true
@@ -82,7 +92,9 @@ services:
       - paxos-network
 
   acceptor-2:
-    build: ./acceptor
+    build:
+      context: .
+      dockerfile: ./acceptor/Dockerfile
     environment:
       - NODE_ID=2
       - DEBUG=true
@@ -95,7 +107,9 @@ services:
       - paxos-network
 
   acceptor-3:
-    build: ./acceptor
+    build:
+      context: .
+      dockerfile: ./acceptor/Dockerfile
     environment:
       - NODE_ID=3
       - DEBUG=true
@@ -108,7 +122,9 @@ services:
       - paxos-network
 
   acceptor-4:
-    build: ./acceptor
+    build:
+      context: .
+      dockerfile: ./acceptor/Dockerfile
     environment:
       - NODE_ID=4
       - DEBUG=true
@@ -121,7 +137,9 @@ services:
       - paxos-network
 
   acceptor-5:
-    build: ./acceptor
+    build:
+      context: .
+      dockerfile: ./acceptor/Dockerfile
     environment:
       - NODE_ID=5
       - DEBUG=true
@@ -135,7 +153,9 @@ services:
 
   # Learners
   learner-1:
-    build: ./learner
+    build:
+      context: .
+      dockerfile: ./learner/Dockerfile
     environment:
       - NODE_ID=1
       - DEBUG=true
@@ -149,7 +169,9 @@ services:
       - paxos-network
 
   learner-2:
-    build: ./learner
+    build:
+      context: .
+      dockerfile: ./learner/Dockerfile
     environment:
       - NODE_ID=2
       - DEBUG=true
@@ -164,7 +186,9 @@ services:
 
   # Cluster Store
   cluster-store-1:
-    build: ./cluster_store
+    build:
+      context: .
+      dockerfile: ./cluster_store/Dockerfile
     environment:
       - NODE_ID=1
       - DEBUG=true
@@ -178,7 +202,9 @@ services:
       - paxos-network
 
   cluster-store-2:
-    build: ./cluster_store
+    build:
+      context: .
+      dockerfile: ./cluster_store/Dockerfile
     environment:
       - NODE_ID=2
       - DEBUG=true
@@ -192,7 +218,9 @@ services:
       - paxos-network
 
   cluster-store-3:
-    build: ./cluster_store
+    build:
+      context: .
+      dockerfile: ./cluster_store/Dockerfile
     environment:
       - NODE_ID=3
       - DEBUG=true
@@ -207,7 +235,9 @@ services:
 
   # Clients
   client-1:
-    build: ./client
+    build:
+      context: .
+      dockerfile: ./client/Dockerfile
     environment:
       - CLIENT_ID=client-1
       - NODE_ID=1
@@ -225,7 +255,9 @@ services:
       - paxos-network
 
   client-2:
-    build: ./client
+    build:
+      context: .
+      dockerfile: ./client/Dockerfile
     environment:
       - CLIENT_ID=client-2
       - NODE_ID=2
@@ -243,7 +275,9 @@ services:
       - paxos-network
 
   client-3:
-    build: ./client
+    build:
+      context: .
+      dockerfile: ./client/Dockerfile
     environment:
       - CLIENT_ID=client-3
       - NODE_ID=3
@@ -261,7 +295,9 @@ services:
       - paxos-network
 
   client-4:
-    build: ./client
+    build:
+      context: .
+      dockerfile: ./client/Dockerfile
     environment:
       - CLIENT_ID=client-4
       - NODE_ID=4
@@ -279,7 +315,9 @@ services:
       - paxos-network
 
   client-5:
-    build: ./client
+    build:
+      context: .
+      dockerfile: ./client/Dockerfile
     environment:
       - CLIENT_ID=client-5
       - NODE_ID=5

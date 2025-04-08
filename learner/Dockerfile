@@ -1,21 +1,16 @@
-# File: learner/Dockerfile
-# Container configuration for the Learner component
-
 FROM python:3.10-slim
 
 WORKDIR /app
 
 # Install dependencies
-COPY learner/requirements.txt .
+COPY learner/requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy common modules
-COPY common /app/common
+# Copy code
+COPY learner/ /app/learner/
+COPY common/ /app/common/
 
-# Copy learner code
-COPY learner /app/learner
-
-# Create directories for persistent data and logs
+# Create persistent data and logs directories
 RUN mkdir -p /data /data/logs
 VOLUME /data
 
@@ -33,7 +28,7 @@ ENV USE_CLUSTER_STORE=false
 # Expose port
 EXPOSE 8080
 
-# Working directory for execution
+# Set working directory
 WORKDIR /app/learner
 
 # Command to start the application
